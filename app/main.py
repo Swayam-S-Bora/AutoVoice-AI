@@ -11,11 +11,25 @@ from app.routers import customers, appointments
 # Load environment variables
 load_dotenv()
 
-# Initialize FastAPI
+from contextlib import asynccontextmanager
+
+# Lifespan handler replacing deprecated on_event
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup actions
+    app_logger.info("=" * 50)
+    app_logger.info("AutoVoice AI Application Starting")
+    app_logger.info("=" * 50)
+    yield
+    # shutdown actions
+    app_logger.info("Application shutting down")
+
+# Initialize FastAPI with lifespan
 app = FastAPI(
     title="AutoVoice AI",
     description="AI-Powered Voice Agent for Automobile Dealerships",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Setup CORS
@@ -31,10 +45,6 @@ app.add_middleware(
 app.include_router(customers.router)
 app.include_router(appointments.router)
 
-# Log application startup
-app_logger.info("=" * 50)
-app_logger.info("AutoVoice AI Application Starting")
-app_logger.info("=" * 50)
 
 @app.get("/")
 async def root():
@@ -56,7 +66,3 @@ async def health_check():
     except Exception as e:
         app_logger.error(f"Database connection failed: {str(e)}")
         return {"status": "unhealthy", "database": str(e)}
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    app_logger.info("Application shutting down")
