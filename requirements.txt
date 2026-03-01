@@ -1,8 +1,21 @@
+# Core Framework
 fastapi==0.134.0
 uvicorn[standard]==0.24.0
+pydantic==2.12.5
+python-multipart==0.0.22
+
+# Database
 supabase==2.0.0
 python-dotenv==1.2.1
 sqlalchemy==2.0.47
 psycopg2-binary==2.9.11
-pydantic==2.12.5
-python-multipart==0.0.22
+
+# AI/ML
+openai-whisper==20250625
+torch==2.10.0
+torchaudio==2.10.0
+
+# Audio Processing
+numpy==2.4.2
+scipy==1.17.1
+soundfile==0.13.1
