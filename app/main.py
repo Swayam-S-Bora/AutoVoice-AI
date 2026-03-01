@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import os
+from app.routers import customers, appointments, voice
 
 # Import our modules
 from app.database import supabase
@@ -44,7 +44,7 @@ app.add_middleware(
 # Include routers
 app.include_router(customers.router)
 app.include_router(appointments.router)
-
+app.include_router(voice.router)
 
 @app.get("/")
 async def root():
