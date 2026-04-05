@@ -16,13 +16,13 @@ async def chat(input_text: str, phone: str):
 
         text, resolved_date = preprocess_input(input_text)
         response = run_agent(text, phone, resolved_date=resolved_date)
-        audio_path = text_to_speech(response)
+        audio_path = text_to_speech(response, phone=phone)
 
         return FileResponse(
             audio_path,
             media_type="audio/mpeg",
-            filename="response.mp3",
-            headers={"X-Response-Text": response},  # text also available in response header
+            filename=os.path.basename(audio_path),
+            headers={"X-Response-Text": response},
         )
 
     except Exception as e:
@@ -36,11 +36,9 @@ async def voice(file: UploadFile, phone: str):
     try:
         access_logger.info(f"/voice | phone={phone} | file={file.filename}")
 
-        # Save uploaded audio temporarily for STT
         with open(stt_path, "wb") as f:
             f.write(await file.read())
 
-        # Transcribe
         text = speech_to_text(stt_path)
 
         if not text:
@@ -48,14 +46,13 @@ async def voice(file: UploadFile, phone: str):
 
         text, resolved_date = preprocess_input(text)
         response = run_agent(text, phone, resolved_date=resolved_date)
-        audio_path = text_to_speech(response)
+        audio_path = text_to_speech(response, phone=phone)
 
-        # Stream the TTS mp3 directly back to the caller
         return FileResponse(
             audio_path,
             media_type="audio/mpeg",
-            filename="response.mp3",
-            headers={"X-Response-Text": response},  # transcript available in header
+            filename=os.path.basename(audio_path),
+            headers={"X-Response-Text": response},
         )
 
     except Exception as e:
@@ -63,7 +60,6 @@ async def voice(file: UploadFile, phone: str):
         return {"error": "Internal server error"}
 
     finally:
-        # Always delete the uploaded STT temp file
         if os.path.exists(stt_path):
             os.remove(stt_path)
             access_logger.info(f"[cleanup] Deleted temp file: {stt_path}")
