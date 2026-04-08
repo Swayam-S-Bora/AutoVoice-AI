@@ -1,5 +1,5 @@
 import json
-from datetime import date as dt_date
+from datetime import date as dt_date, datetime
 from groq import Groq
 from app.core.config import settings
 from app.core.logger import agent_logger, error_logger
@@ -18,6 +18,43 @@ TOOLS = {
     "create_booking": tool_create_booking,
     "get_vehicle_info": get_vehicle_info,
 }
+
+
+def format_slot_ranges(slots: list) -> str:
+    """
+    Given a list of {'start_time': 'HH:MM', 'end_time': 'HH:MM'} dicts,
+    group consecutive start times into human-readable ranges.
+    e.g.  "10 AM to 5 PM"  or  "10 AM to 12 PM and 3 PM to 5 PM"
+    """
+    if not slots:
+        return ""
+
+    def to_12h(t: str) -> str:
+        h, m = int(t.split(":")[0]), int(t.split(":")[1])
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h if h <= 12 else h - 12
+        if h == 0:
+            h12 = 12
+        return f"{h12} {suffix}" if m == 0 else f"{h12}:{m:02d} {suffix}"
+
+    starts = sorted(set(
+        int(s["start_time"].split(":")[0]) * 60 + int(s["start_time"].split(":")[1])
+        for s in slots
+    ))
+
+    ranges, run_start, prev = [], starts[0], starts[0]
+    for t in starts[1:]:
+        if t - prev > 30:
+            ranges.append((run_start, prev))
+            run_start = t
+        prev = t
+    ranges.append((run_start, prev))
+
+    def mins_to_hhmm(m: int) -> str:
+        return f"{m // 60:02d}:{m % 60:02d}"
+
+    parts = [f"{to_12h(mins_to_hhmm(rs))} to {to_12h(mins_to_hhmm(re))}" for rs, re in ranges]
+    return " and ".join(parts)
 
 
 def run_agent(user_input: str, phone: str, resolved_date: str | None = None) -> str:
@@ -161,16 +198,60 @@ def run_agent(user_input: str, phone: str, resolved_date: str | None = None) -> 
                         )
                     else:
                         slot_list = [s["start_time"] for s in result]
-                        obs = (
-                            f"TOOL RESULT [get_available_slots]: "
-                            f"Available slots — {', '.join(slot_list)}. "
-                            f"Ask the user to pick one."
+                        state["available_slots"] = slot_list
+                        save_state(phone, state)
+                        ranges = format_slot_ranges(result)
+                        all_starts = sorted(
+                            int(s["start_time"].split(":")[0]) * 60 + int(s["start_time"].split(":")[1])
+                            for s in result
                         )
+                        is_fully_open = all(
+                            all_starts[i+1] - all_starts[i] == 30
+                            for i in range(len(all_starts) - 1)
+                        )
+                        if is_fully_open:
+                            obs = (
+                                f"TOOL RESULT [get_available_slots]: "
+                                f"No bookings on this date — all slots are open. "
+                                f"Tell the user: slots available from 10 AM to 5 PM. Ask which time they prefer."
+                            )
+                        else:
+                            obs = (
+                                f"TOOL RESULT [get_available_slots]: "
+                                f"Available start times grouped into ranges: {ranges}. "
+                                f"Individual available start times: {', '.join(slot_list)}. "
+                                f"Tell the user the available ranges (e.g. '10 AM to 12 PM and 3 PM to 5 PM'). Ask which time they prefer."
+                            )
                     history.append({"role": "user", "content": obs})
 
                 elif tool_name == "create_booking":
                     if isinstance(result, dict) and "error" in result:
-                        obs = f"TOOL RESULT [create_booking]: Failed — {result['error']}. Inform the user."
+                        # Re-fetch available slots so we can show the user the correct ranges
+                        from app.tools.booking_tools import tool_get_slots as _tgs
+                        fresh = _tgs({"date": state.get("date"), "service_type": state.get("service_type", "basic")})
+                        if fresh:
+                            state["available_slots"] = [s["start_time"] for s in fresh]
+                            save_state(phone, state)
+                            ranges = format_slot_ranges(fresh)
+                            obs = (
+                                f"TOOL RESULT [create_booking]: The slot the user requested is NOT available (already booked). "
+                                f"Available ranges on {state.get('date')}: {ranges}. "
+                                f"Individual available starts: {', '.join(state['available_slots'])}. "
+                                f"Reset time and slot_confirmed to null/false. "
+                                f"Tell the user that slot is taken and offer these ranges. Ask which time works."
+                            )
+                            state["time"] = None
+                            state["slot_confirmed"] = False
+                            save_state(phone, state)
+                        else:
+                            state["date"] = None
+                            state["time"] = None
+                            state["slot_confirmed"] = False
+                            save_state(phone, state)
+                            obs = (
+                                f"TOOL RESULT [create_booking]: Slot not available and no other slots on that date. "
+                                f"Date cleared. Ask the user to pick a different date."
+                            )
                     else:
                         obs = "TOOL RESULT [create_booking]: Booking confirmed successfully. Use final_booking action now."
                     history.append({"role": "user", "content": obs})
