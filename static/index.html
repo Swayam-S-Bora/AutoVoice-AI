@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoVoice AI — Service Booking</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --border: #2a2d3a;
+      --accent: #6c63ff;
+      --accent2: #ff6b6b;
+      --text: #e8eaf6;
+      --muted: #7c7f9c;
+      --green: #4caf82;
+      --wave: #6c63ff;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 4px;
+    }
+    h1 span { color: var(--accent); }
+
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 32px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 36px 32px;
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    /* Phone input */
+    .phone-row {
+      display: flex;
+      gap: 10px;
+      width: 100%;
+    }
+    .phone-row input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 0.95rem;
+      padding: 10px 14px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .phone-row input:focus { border-color: var(--accent); }
+    .phone-row button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .phone-row button:hover { opacity: 0.85; }
+
+    /* Visualizer */
+    .visualizer-wrap {
+      position: relative;
+      width: 160px;
+      height: 160px;
+    }
+    canvas#viz {
+      border-radius: 50%;
+      display: block;
+    }
+
+    /* Big mic button */
+    #mic-btn {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-size: 2rem;
+      cursor: pointer;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 0 0 rgba(108,99,255,.4);
+      transition: background .2s, box-shadow .2s;
+      z-index: 2;
+    }
+    #mic-btn.recording {
+      background: var(--accent2);
+      animation: pulse 1.2s infinite;
+    }
+    #mic-btn.playing { background: var(--green); }
+    #mic-btn:disabled { opacity: 0.4; cursor: default; animation: none; }
+
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(255,107,107,.5); }
+      70%  { box-shadow: 0 0 0 18px rgba(255,107,107,0); }
+      100% { box-shadow: 0 0 0 0 rgba(255,107,107,0); }
+    }
+
+    /* Status */
+    #status {
+      font-size: 0.82rem;
+      color: var(--muted);
+      min-height: 20px;
+      text-align: center;
+    }
+    #status.active { color: var(--accent); }
+    #status.error  { color: var(--accent2); }
+
+    /* Transcript / log */
+    #log {
+      width: 100%;
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 0 2px;
+    }
+    .msg {
+      font-size: 0.85rem;
+      line-height: 1.45;
+      padding: 8px 12px;
+      border-radius: 10px;
+      max-width: 90%;
+      word-break: break-word;
+    }
+    .msg.user {
+      background: rgba(108,99,255,.18);
+      border: 1px solid rgba(108,99,255,.3);
+      align-self: flex-end;
+    }
+    .msg.agent {
+      background: rgba(255,255,255,.05);
+      border: 1px solid var(--border);
+      align-self: flex-start;
+    }
+    .msg .label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    /* Hold hint */
+    .hint {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    /* Scrollbar */
+    #log::-webkit-scrollbar { width: 4px; }
+    #log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <h1>Auto<span>Voice</span> AI</h1>
+  <p class="subtitle">Automobile Service Booking Assistant</p>
+
+  <div class="card">
+    <div class="phone-row">
+      <input id="phone-input" type="tel" placeholder="Your phone number" value="9999999999" />
+      <button id="connect-btn">Connect</button>
+    </div>
+
+    <div class="visualizer-wrap">
+      <canvas id="viz" width="160" height="160"></canvas>
+      <button id="mic-btn" disabled title="Hold to speak">🎙️</button>
+    </div>
+
+    <div id="status">Enter your phone number and click Connect</div>
+    <p class="hint">Hold the mic button while speaking — release to send</p>
+
+    <div id="log"></div>
+  </div>
+
+<script>
+// ────────────────────────────────────────────────────────────────────────────
+// Config
+// ────────────────────────────────────────────────────────────────────────────
+const SAMPLE_RATE   = 24000;   // must match Deepgram output
+const CHANNELS      = 1;
+const BIT_DEPTH     = 16;      // signed 16-bit PCM little-endian
+const END_OF_RESPONSE = new Uint8Array([0xFF, 0xFE]);
+
+// ────────────────────────────────────────────────────────────────────────────
+// DOM refs
+// ────────────────────────────────────────────────────────────────────────────
+const phoneInput  = document.getElementById('phone-input');
+const connectBtn  = document.getElementById('connect-btn');
+const micBtn      = document.getElementById('mic-btn');
+const statusEl    = document.getElementById('status');
+const logEl       = document.getElementById('log');
+const vizCanvas   = document.getElementById('viz');
+const ctx2d       = vizCanvas.getContext('2d');
+
+// ────────────────────────────────────────────────────────────────────────────
+// State
+// ────────────────────────────────────────────────────────────────────────────
+let ws             = null;
+let mediaRecorder  = null;
+let audioCtx       = null;
+let analyser       = null;
+let vizRaf         = null;
+let pcmQueue       = [];       // ArrayBuffers of incoming PCM
+let isPlaying      = false;
+let nextPlayTime   = 0;
+let streamDone     = false;
+let chunksReceived = 0;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Status helper
+// ────────────────────────────────────────────────────────────────────────────
+function setStatus(msg, cls = '') {
+  statusEl.textContent = msg;
+  statusEl.className   = cls;
+}
+
+function addMessage(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  wrap.innerHTML = `<div class="label">${role === 'user' ? 'You' : 'Agent'}</div>${text}`;
+  logEl.appendChild(wrap);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Visualizer (mic input)
+// ────────────────────────────────────────────────────────────────────────────
+function startViz(stream) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  const src = audioCtx.createMediaStreamSource(stream);
+  src.connect(analyser);
+  drawViz();
+}
+
+function stopViz() {
+  cancelAnimationFrame(vizRaf);
+  ctx2d.clearRect(0, 0, 160, 160);
+}
+
+function drawViz() {
+  vizRaf = requestAnimationFrame(drawViz);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+
+  ctx2d.clearRect(0, 0, 160, 160);
+  const cx = 80, cy = 80, r = 36;
+  const barCount = 48;
+  for (let i = 0; i < barCount; i++) {
+    const val   = data[Math.floor(i * data.length / barCount)] / 255;
+    const angle = (i / barCount) * Math.PI * 2 - Math.PI / 2;
+    const inner = r;
+    const outer = r + val * 28 + 4;
+    const alpha = 0.4 + val * 0.6;
+    ctx2d.strokeStyle = `rgba(108,99,255,${alpha})`;
+    ctx2d.lineWidth   = 2.5;
+    ctx2d.beginPath();
+    ctx2d.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
+    ctx2d.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
+    ctx2d.stroke();
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PCM playback queue
+// ────────────────────────────────────────────────────────────────────────────
+function ensureAudioCtx() {
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function enqueuePCM(arrayBuffer) {
+  pcmQueue.push(arrayBuffer);
+  if (!isPlaying) drainQueue();
+}
+
+function drainQueue() {
+  if (pcmQueue.length === 0) {
+    if (streamDone) {
+      isPlaying = false;
+      micBtn.classList.remove('playing');
+      micBtn.disabled = false;
+      setStatus('Ready — hold mic to speak', 'active');
+    }
+    return;
+  }
+
+  isPlaying = true;
+  micBtn.classList.add('playing');
+  micBtn.disabled = true;
+
+  const raw = pcmQueue.shift();
+  // raw PCM: signed 16-bit LE mono @ SAMPLE_RATE
+  const samples = new Int16Array(raw);
+  const floats  = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) floats[i] = samples[i] / 32768;
+
+  const buf = audioCtx.createBuffer(1, floats.length, SAMPLE_RATE);
+  buf.getChannelData(0).set(floats);
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+
+  const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
+  src.start(startAt);
+  nextPlayTime = startAt + buf.duration;
+
+  src.onended = drainQueue;
+}
+
+function isEOR(data) {
+  if (data.byteLength !== 2) return false;
+  const v = new Uint8Array(data);
+  return v[0] === 0xFF && v[1] === 0xFE;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// WebSocket
+// ────────────────────────────────────────────────────────────────────────────
+function connect(phone) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(phone)}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('Connected — hold mic to speak', 'active');
+    micBtn.disabled = false;
+    connectBtn.textContent = 'Disconnect';
+    connectBtn.onclick = disconnect;
+  };
+
+  ws.onmessage = (ev) => {
+    if (isEOR(ev.data)) {
+      streamDone = true;
+      drainQueue();   // flush remaining queue when stream is done
+      return;
+    }
+    ensureAudioCtx();
+    chunksReceived++;
+    if (chunksReceived === 1) {
+      nextPlayTime = 0;  // reset for fresh response
+      micBtn.classList.add('playing');
+    }
+    enqueuePCM(ev.data);
+  };
+
+  ws.onerror = (e) => { setStatus('Connection error', 'error'); };
+  ws.onclose = () => {
+    setStatus('Disconnected');
+    micBtn.disabled = true;
+    connectBtn.textContent = 'Connect';
+    connectBtn.onclick = () => handleConnect();
+    ws = null;
+  };
+}
+
+function disconnect() {
+  if (mediaRecorder) { mediaRecorder.stop(); mediaRecorder = null; }
+  if (micStream)     { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  stopViz();
+  if (ws) ws.close();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Mic stream — kept alive across utterances so getUserMedia only fires once,
+// but a NEW MediaRecorder is created per utterance. This guarantees every
+// recording starts with a fresh EBML/WebM container header (the first ~2 KB
+// chunk from MediaRecorder) so Groq Whisper can always identify the codec.
+// ────────────────────────────────────────────────────────────────────────────
+let micStream = null;  // persistent MediaStream (opened on first hold)
+
+async function ensureMicStream() {
+  if (micStream && micStream.active) return micStream;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  startViz(micStream);
+  return micStream;
+}
+
+async function startRecording() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  try {
+    const stream = await ensureMicStream();
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm';
+
+    // Fresh MediaRecorder every utterance → always emits EBML header in chunk 0
+    mediaRecorder = new MediaRecorder(stream, { mimeType, bitsPerSecond: 64000 });
+    mediaRecorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(ev.data);
+      }
+    };
+    mediaRecorder.start(100);  // 100ms chunks for low latency
+
+    micBtn.classList.add('recording');
+    setStatus('Recording… release to send', 'active');
+  } catch (e) {
+    setStatus('Mic access denied', 'error');
+    console.error(e);
+  }
+}
+
+function stopRecording() {
+  if (!mediaRecorder) return;
+
+  // Stop the recorder but keep micStream alive for the next utterance
+  mediaRecorder.stop();
+  mediaRecorder = null;
+  micBtn.classList.remove('recording');
+
+  // Send end-of-utterance signal
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(new Uint8Array([0x00]).buffer);
+    setStatus('Processing…', 'active');
+    micBtn.disabled = true;
+
+    // Reset playback state for new response
+    streamDone = false;
+    chunksReceived = 0;
+    isPlaying = false;
+    pcmQueue = [];
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Event wiring
+// ────────────────────────────────────────────────────────────────────────────
+function handleConnect() {
+  const phone = phoneInput.value.trim();
+  if (!phone) { setStatus('Please enter a phone number', 'error'); return; }
+  connect(phone);
+}
+
+connectBtn.onclick = handleConnect;
+phoneInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleConnect(); });
+
+// Hold-to-talk
+micBtn.addEventListener('mousedown',  startRecording);
+micBtn.addEventListener('mouseup',    stopRecording);
+micBtn.addEventListener('mouseleave', stopRecording);
+micBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
+micBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording();  });
+</script>
+</body>
+</html>
