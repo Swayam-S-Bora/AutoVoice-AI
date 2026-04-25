@@ -1,46 +1,189 @@
-import os
+"""
+speech_service.py
+-----------------
+STT  → Groq Whisper (whisper-large-v3-turbo)  [sync, called via executor]
+TTS  → Deepgram streaming TTS                  [async generator → audio bytes]
+
+Phrase cache: common short phrases are pre-generated at import time so the
+very first audio byte for greetings / fillers is instant.
+"""
+from __future__ import annotations
+
+import asyncio
+import io
+import random
+from typing import AsyncIterator
+
+import httpx
 from groq import Groq
-from gtts import gTTS
+
 from app.core.config import settings
 from app.core.logger import app_logger, error_logger
 
-client = Groq(api_key=settings.GROQ_API_KEY)
+# ---------------------------------------------------------------------------
+# Clients
+# ---------------------------------------------------------------------------
+_groq = Groq(api_key=settings.GROQ_API_KEY)
 
-RESPONSES_DIR = "responses"
-os.makedirs(RESPONSES_DIR, exist_ok=True)
+DEEPGRAM_TTS_URL = "https://api.deepgram.com/v1/speak"
+DEEPGRAM_HEADERS = {
+    "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
+    "Content-Type": "application/json",
+}
+# Deepgram model + voice — Aura Asteria is natural, low-latency
+DEEPGRAM_PARAMS = {
+    "model": "aura-asteria-en",
+    "encoding": "linear16",
+    "sample_rate": "24000",
+    "container": "none",   # raw PCM — browser AudioContext handles it directly
+}
+
+# ---------------------------------------------------------------------------
+# Thinking / filler phrases (streamed immediately before a tool call)
+# ---------------------------------------------------------------------------
+THINKING_PHRASES = [
+    "Sure, let me check that for you.",
+    "One moment please.",
+    "Let me look that up for you.",
+    "Just a second while I check.",
+    "Hold on, let me pull that up.",
+    "Right, give me just a moment.",
+]
 
 
-def speech_to_text(file_path: str) -> str | None:
+def pick_filler() -> str:
+    return random.choice(THINKING_PHRASES)
+
+
+# ---------------------------------------------------------------------------
+# Phrase cache — pre-warm common audio blobs so TTFA ≈ 0 for cached phrases
+# ---------------------------------------------------------------------------
+_phrase_cache: dict[str, bytes] = {}
+
+
+async def _fetch_tts_bytes(text: str) -> bytes:
+    """Blocking Deepgram TTS fetch → bytes (used for cache warming only)."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            DEEPGRAM_TTS_URL,
+            headers=DEEPGRAM_HEADERS,
+            params=DEEPGRAM_PARAMS,
+            json={"text": text},
+        )
+        r.raise_for_status()
+        return r.content
+
+
+async def warm_phrase_cache() -> None:
+    """Pre-generate audio for every filler phrase at startup."""
+    tasks = {phrase: _fetch_tts_bytes(phrase) for phrase in THINKING_PHRASES}
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for phrase, result in zip(tasks.keys(), results):
+        if isinstance(result, bytes):
+            _phrase_cache[phrase] = result
+            app_logger.info(f"[TTS cache] Warmed: '{phrase[:40]}…'")
+        else:
+            error_logger.warning(f"[TTS cache] Failed to warm '{phrase}': {result}")
+
+
+# ---------------------------------------------------------------------------
+# STT — Groq Whisper (synchronous, run in executor from async context)
+# ---------------------------------------------------------------------------
+
+# Whisper hallucinates text on silence or very short clips. These are known
+# phantom outputs (non-English fragments, filler words) that should be dropped.
+_WHISPER_HALLUCINATIONS = {
+    "thank you.",
+    "thank you",
+    "thanks.",
+    "thanks",
+    "you",
+    ".",
+    "",
+    "bye.",
+    "bye",
+    "...",
+    "ugh",
+}
+
+# Minimum raw audio size to bother sending to Whisper.
+# WebM header alone is ~600 bytes; real speech adds at least ~3 KB per second.
+# Clips under this threshold are almost certainly silence or mic tap noise.
+_MIN_AUDIO_BYTES = 4_000
+
+
+def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> str | None:
+    """
+    Transcribe raw audio bytes using Groq Whisper.
+    Must be called via asyncio.get_event_loop().run_in_executor() from async code.
+
+    Guards applied before returning:
+    - Minimum byte length gate (drop near-silence clips)
+    - language="en" to prevent Whisper switching to non-English on ambiguous audio
+    - Hallucination filter for known phantom outputs
+    """
+    if len(audio_bytes) < _MIN_AUDIO_BYTES:
+        app_logger.info(f"[STT] Skipped — audio too short ({len(audio_bytes)} bytes)")
+        return None
+
     try:
-        with open(file_path, "rb") as audio:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",
-                file=audio,
-            )
-        text = transcript.text.strip()
-        app_logger.info(f"[STT] Transcribed: '{text}'")
-        return text if text else None
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "audio.webm"  # Groq needs a filename with extension
+        transcript = _groq.audio.transcriptions.create(
+            model="whisper-large-v3-turbo",
+            file=audio_file,
+            response_format="text",
+            language="en",          # pin to English — stops non-Latin hallucinations
+        )
+        text = (transcript.strip() if isinstance(transcript, str) else transcript.text.strip())
+
+        # Drop known Whisper hallucinations on silence/noise
+        if text.lower() in _WHISPER_HALLUCINATIONS:
+            app_logger.info(f"[STT] Hallucination filtered: '{text}'")
+            return None
+
+        # Drop anything with non-ASCII characters (language bleed like '��r svoja.')
+        try:
+            text.encode("ascii")
+        except UnicodeEncodeError:
+            app_logger.info(f"[STT] Non-ASCII hallucination filtered: '{text}'")
+            return None
+
+        app_logger.info(f"[STT] '{text}'")
+        return text or None
     except Exception as e:
-        error_logger.error(f"[STT] Groq STT failed: {str(e)}")
+        error_logger.error(f"[STT] Groq Whisper failed: {e}")
         return None
 
 
-def text_to_speech(text: str, phone: str = "unknown") -> str:
+# ---------------------------------------------------------------------------
+# TTS — Deepgram streaming (async generator → yields raw PCM chunks)
+# ---------------------------------------------------------------------------
+async def text_to_speech_stream(text: str) -> AsyncIterator[bytes]:
     """
-    Saves TTS audio to responses/<phone>_<timestamp>.mp3
-    Returns the file path.
+    Yield raw PCM audio chunks from Deepgram as they arrive.
+    Uses HTTP streaming so the first byte arrives as fast as possible.
+
+    If the phrase is in the cache, yields the cached blob immediately.
     """
+    if text in _phrase_cache:
+        app_logger.info("[TTS] Cache hit")
+        yield _phrase_cache[text]
+        return
+
     try:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{phone}_{timestamp}.mp3"
-        file_path = os.path.join(RESPONSES_DIR, filename)
-
-        tts = gTTS(text)
-        tts.save(file_path)
-
-        app_logger.info(f"[TTS] Saved: {file_path}")
-        return file_path
+        async with httpx.AsyncClient(timeout=30) as client:
+            async with client.stream(
+                "POST",
+                DEEPGRAM_TTS_URL,
+                headers=DEEPGRAM_HEADERS,
+                params=DEEPGRAM_PARAMS,
+                json={"text": text},
+            ) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    if chunk:
+                        yield chunk
     except Exception as e:
-        error_logger.error(f"[TTS] gTTS failed: {str(e)}")
-        return ""
+        error_logger.error(f"[TTS] Deepgram stream failed: {e}")
+        return
