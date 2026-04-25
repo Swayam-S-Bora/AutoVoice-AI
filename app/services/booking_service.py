@@ -59,7 +59,13 @@ def create_booking(customer, date, start_time, service_type):
             app_logger.warning("Slot not available")
             return {"error": "Slot not available"}
 
-        customer_res = supabase.table("customers").insert(customer).execute()
+        # Upsert on phone so repeat bookings from the same caller never
+        # throw a duplicate-key violation (23505). on_conflict="phone" means
+        # Supabase will UPDATE the name/car_model columns if the row exists,
+        # and always return the row with its id.
+        customer_res = supabase.table("customers").upsert(
+            customer, on_conflict="phone"
+        ).execute()
         customer_id = customer_res.data[0]["id"]
 
         booking = supabase.table("appointments").insert({
