@@ -20,9 +20,7 @@ from groq import Groq
 from app.core.config import settings
 from app.core.logger import app_logger, error_logger
 
-# ---------------------------------------------------------------------------
 # Clients
-# ---------------------------------------------------------------------------
 _groq = Groq(api_key=settings.GROQ_API_KEY)
 
 DEEPGRAM_TTS_URL = "https://api.deepgram.com/v1/speak"
@@ -38,9 +36,7 @@ DEEPGRAM_PARAMS = {
     "container": "none",   # raw PCM — browser AudioContext handles it directly
 }
 
-# ---------------------------------------------------------------------------
 # Thinking / filler phrases (streamed immediately before a tool call)
-# ---------------------------------------------------------------------------
 THINKING_PHRASES = [
     "Sure, let me check that for you.",
     "One moment please.",
@@ -50,14 +46,52 @@ THINKING_PHRASES = [
     "Right, give me just a moment.",
 ]
 
+# Farewell phrases — spoken at the end of a completed booking (final_booking action).
+# Pre-warmed at startup so there is zero TTS latency on the closing line.
+FAREWELL_PHRASES = [
+    "Thank you for choosing us! We'll see you on the day. Take care!",
+    "All done! We look forward to seeing your car. Have a great day!",
+    "You're all set! Thanks for booking with us. See you soon!",
+    "Perfect, everything is confirmed. Thanks for calling, and see you then!",
+]
+
+# Mid-conversation interrupt notice — spoken when a new booking intent is detected
+# while a previous conversation is still in progress.
+INTERRUPTION_PHRASES = [
+    "Sure! Let me start fresh for you.",
+    "Of course, starting over now.",
+    "No problem, let's begin again.",
+]
+
+# Greeting responses — returned instantly via fast-path (no LLM call).
+# Pre-warmed at startup so TTFA for "hi / hello" is effectively 0 ms.
+GREETING_PHRASES = [
+    "Hello! Welcome to our service center. How can I help you today?",
+    "Hi there! Thanks for calling. How can I assist you?",
+    "Hey! Good to hear from you. What can I do for you today?",
+]
+
+# All phrases eligible for pre-warming (filler + farewell + interruption + greeting)
+ALL_WARMABLE_PHRASES = THINKING_PHRASES + FAREWELL_PHRASES + INTERRUPTION_PHRASES + GREETING_PHRASES
+
 
 def pick_filler() -> str:
     return random.choice(THINKING_PHRASES)
 
 
-# ---------------------------------------------------------------------------
+def pick_farewell() -> str:
+    return random.choice(FAREWELL_PHRASES)
+
+
+def pick_interruption() -> str:
+    return random.choice(INTERRUPTION_PHRASES)
+
+
+def pick_greeting() -> str:
+    return random.choice(GREETING_PHRASES)
+
+
 # Phrase cache — pre-warm common audio blobs so TTFA ≈ 0 for cached phrases
-# ---------------------------------------------------------------------------
 _phrase_cache: dict[str, bytes] = {}
 
 
@@ -75,20 +109,20 @@ async def _fetch_tts_bytes(text: str) -> bytes:
 
 
 async def warm_phrase_cache() -> None:
-    """Pre-generate audio for every filler phrase at startup."""
-    tasks = {phrase: _fetch_tts_bytes(phrase) for phrase in THINKING_PHRASES}
+    """Pre-generate audio for all warmable phrases (fillers, farewells, interruptions) at startup."""
+    tasks = {phrase: _fetch_tts_bytes(phrase) for phrase in ALL_WARMABLE_PHRASES}
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    warmed = 0
     for phrase, result in zip(tasks.keys(), results):
         if isinstance(result, bytes):
             _phrase_cache[phrase] = result
-            app_logger.info(f"[TTS cache] Warmed: '{phrase[:40]}…'")
+            warmed += 1
         else:
-            error_logger.warning(f"[TTS cache] Failed to warm '{phrase}': {result}")
+            error_logger.warning(f"[TTS cache] Failed to warm '{phrase[:40]}': {result}")
+    app_logger.info(f"[TTS cache] Warmed {warmed}/{len(ALL_WARMABLE_PHRASES)} phrases.")
 
 
-# ---------------------------------------------------------------------------
 # STT — Groq Whisper (synchronous, run in executor from async context)
-# ---------------------------------------------------------------------------
 
 # Whisper hallucinates text on silence or very short clips. These are known
 # phantom outputs (non-English fragments, filler words) that should be dropped.
@@ -156,9 +190,7 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
         return None
 
 
-# ---------------------------------------------------------------------------
 # TTS — Deepgram streaming (async generator → yields raw PCM chunks)
-# ---------------------------------------------------------------------------
 async def text_to_speech_stream(text: str) -> AsyncIterator[bytes]:
     """
     Yield raw PCM audio chunks from Deepgram as they arrive.

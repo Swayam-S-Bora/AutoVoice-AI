@@ -59,10 +59,6 @@ def create_booking(customer, date, start_time, service_type):
             app_logger.warning("Slot not available")
             return {"error": "Slot not available"}
 
-        # Upsert on phone so repeat bookings from the same caller never
-        # throw a duplicate-key violation (23505). on_conflict="phone" means
-        # Supabase will UPDATE the name/car_model columns if the row exists,
-        # and always return the row with its id.
         customer_res = supabase.table("customers").upsert(
             customer, on_conflict="phone"
         ).execute()
@@ -84,3 +80,97 @@ def create_booking(customer, date, start_time, service_type):
     except Exception as e:
         error_logger.error(f"Booking Error: {str(e)}")
         return {"error": "Booking failed"}
+
+
+def update_booking(phone: str, updates: dict):
+    """
+    Find the most recent 'booked' appointment for this phone and update it.
+    `updates` may contain: date, start_time, service_type.
+    Recalculates end_time whenever start_time or service_type changes.
+    Returns the updated row or {"error": "..."}.
+    """
+    try:
+        app_logger.info(f"Updating booking | phone=***{phone[-4:]} | updates={updates}")
+
+        # Resolve the customer_id from phone
+        cust_res = supabase.table("customers") \
+            .select("id") \
+            .eq("phone", phone) \
+            .limit(1) \
+            .execute()
+
+        if not cust_res.data:
+            return {"error": "No customer found for this phone number."}
+
+        customer_id = cust_res.data[0]["id"]
+
+        # Find the most recent booked appointment
+        appt_res = supabase.table("appointments") \
+            .select("*") \
+            .eq("customer_id", customer_id) \
+            .eq("status", "booked") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+
+        if not appt_res.data:
+            return {"error": "No active booking found to update."}
+
+        existing = appt_res.data[0]
+        appt_id = existing["id"]
+
+        # Build the patch dict — only update what was supplied
+        patch = {}
+        new_date = updates.get("date") or existing["appointment_date"]
+        new_start = updates.get("start_time") or existing["start_time"]
+        new_service = updates.get("service_type") or existing["service_type"]
+
+        if "date" in updates:
+            patch["appointment_date"] = new_date
+        if "start_time" in updates:
+            patch["start_time"] = new_start
+        if "service_type" in updates:
+            patch["service_type"] = new_service
+
+        if not patch:
+            return {"error": "No valid fields supplied for update."}
+
+        # Check slot availability for the (possibly new) date/time
+        new_start_time = new_start
+        available = get_available_slots(new_date, new_service)
+        available_times = [s["start_time"] for s in available]
+
+        # When checking availability for an update, the existing slot
+        # counts as "available" to itself, so temporarily exclude it
+        # from conflict detection by also checking the original date matches.
+        if (new_date == existing["appointment_date"]
+                and new_start_time == existing["start_time"]
+                and new_service == existing["service_type"]):
+            # Nothing meaningful changed — succeed without touching DB
+            return existing
+
+        if new_start_time not in available_times:
+            # Return the available slots so the agent can offer alternatives
+            return {
+                "error": "Slot not available",
+                "available_slots": available_times,
+                "date": new_date,
+            }
+
+        # Recalculate end_time
+        duration = SERVICE_DURATION[new_service.lower()]
+        start_dt = datetime.strptime(f"{new_date} {new_start_time}", "%Y-%m-%d %H:%M")
+        end_dt = start_dt + timedelta(minutes=duration)
+        patch["end_time"] = end_dt.strftime("%H:%M")
+
+        result = supabase.table("appointments") \
+            .update(patch) \
+            .eq("id", appt_id) \
+            .execute()
+
+        app_logger.info(f"Booking updated: {patch}")
+        return result.data[0] if result.data else {"error": "Update returned no data."}
+
+    except Exception as e:
+        error_logger.error(f"update_booking error: {str(e)}")
+        return {"error": f"Update failed: {str(e)}"}
