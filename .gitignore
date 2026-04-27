@@ -1,5 +1,26 @@
+# Environment
 .env
-/venv
-__pycache__
+*.env
+!example.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Logs
+logs/
 *.log
-*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
