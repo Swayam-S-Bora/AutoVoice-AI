@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoVoice AI — Service Booking</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -195,7 +196,7 @@
 
   <div class="card">
     <div class="phone-row">
-      <input id="phone-input" type="tel" placeholder="Your phone number" value="9999999999" />
+      <input id="phone-input" type="tel" placeholder="Your phone number" autocomplete="tel" />
       <button id="connect-btn">Connect</button>
     </div>
 
@@ -211,17 +212,14 @@
   </div>
 
 <script>
-// ────────────────────────────────────────────────────────────────────────────
+
 // Config
-// ────────────────────────────────────────────────────────────────────────────
 const SAMPLE_RATE   = 24000;   // must match Deepgram output
 const CHANNELS      = 1;
 const BIT_DEPTH     = 16;      // signed 16-bit PCM little-endian
 const END_OF_RESPONSE = new Uint8Array([0xFF, 0xFE]);
 
-// ────────────────────────────────────────────────────────────────────────────
 // DOM refs
-// ────────────────────────────────────────────────────────────────────────────
 const phoneInput  = document.getElementById('phone-input');
 const connectBtn  = document.getElementById('connect-btn');
 const micBtn      = document.getElementById('mic-btn');
@@ -230,9 +228,7 @@ const logEl       = document.getElementById('log');
 const vizCanvas   = document.getElementById('viz');
 const ctx2d       = vizCanvas.getContext('2d');
 
-// ────────────────────────────────────────────────────────────────────────────
 // State
-// ────────────────────────────────────────────────────────────────────────────
 let ws             = null;
 let mediaRecorder  = null;
 let audioCtx       = null;
@@ -244,9 +240,7 @@ let nextPlayTime   = 0;
 let streamDone     = false;
 let chunksReceived = 0;
 
-// ────────────────────────────────────────────────────────────────────────────
 // Status helper
-// ────────────────────────────────────────────────────────────────────────────
 function setStatus(msg, cls = '') {
   statusEl.textContent = msg;
   statusEl.className   = cls;
@@ -260,9 +254,7 @@ function addMessage(role, text) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // Visualizer (mic input)
-// ────────────────────────────────────────────────────────────────────────────
 function startViz(stream) {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
   analyser = audioCtx.createAnalyser();
@@ -300,9 +292,7 @@ function drawViz() {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // PCM playback queue
-// ────────────────────────────────────────────────────────────────────────────
 function ensureAudioCtx() {
   if (!audioCtx || audioCtx.state === 'closed') {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
@@ -356,12 +346,27 @@ function isEOR(data) {
   return v[0] === 0xFF && v[1] === 0xFE;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // WebSocket
-// ────────────────────────────────────────────────────────────────────────────
-function connect(phone) {
+async function connect(phone) {
+  // Step 1: obtain a short-lived HMAC token from the server
+  let token;
+  try {
+    const res = await fetch(`/auth/token?phone=${encodeURIComponent(phone)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setStatus(err.detail || 'Invalid phone number', 'error');
+      return;
+    }
+    const data = await res.json();
+    token = data.token;
+  } catch (e) {
+    setStatus('Could not reach server', 'error');
+    return;
+  }
+
+  // Step 2: open the WebSocket with the token in the query string
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(phone)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(phone)}?token=${encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -374,21 +379,27 @@ function connect(phone) {
   ws.onmessage = (ev) => {
     if (isEOR(ev.data)) {
       streamDone = true;
-      drainQueue();   // flush remaining queue when stream is done
+      drainQueue();
       return;
     }
     ensureAudioCtx();
     chunksReceived++;
     if (chunksReceived === 1) {
-      nextPlayTime = 0;  // reset for fresh response
+      nextPlayTime = 0;
       micBtn.classList.add('playing');
     }
     enqueuePCM(ev.data);
   };
 
   ws.onerror = (e) => { setStatus('Connection error', 'error'); };
-  ws.onclose = () => {
-    setStatus('Disconnected');
+  ws.onclose = (ev) => {
+    if (ev.code === 4001) {
+      setStatus('Auth failed — please reconnect', 'error');
+    } else if (ev.code === 4000) {
+      setStatus('Invalid phone number', 'error');
+    } else {
+      setStatus('Disconnected');
+    }
     micBtn.disabled = true;
     connectBtn.textContent = 'Connect';
     connectBtn.onclick = () => handleConnect();
@@ -403,12 +414,10 @@ function disconnect() {
   if (ws) ws.close();
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // Mic stream — kept alive across utterances so getUserMedia only fires once,
 // but a NEW MediaRecorder is created per utterance. This guarantees every
 // recording starts with a fresh EBML/WebM container header (the first ~2 KB
 // chunk from MediaRecorder) so Groq Whisper can always identify the codec.
-// ────────────────────────────────────────────────────────────────────────────
 let micStream = null;  // persistent MediaStream (opened on first hold)
 
 async function ensureMicStream() {
@@ -467,13 +476,13 @@ function stopRecording() {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // Event wiring
-// ────────────────────────────────────────────────────────────────────────────
 function handleConnect() {
   const phone = phoneInput.value.trim();
   if (!phone) { setStatus('Please enter a phone number', 'error'); return; }
-  connect(phone);
+  // Basic client-side phone check (7-15 digits, optional leading +)
+  if (!/^\+?\d{7,15}$/.test(phone)) { setStatus('Enter a valid phone number', 'error'); return; }
+  connect(phone);  // async — errors handled inside
 }
 
 connectBtn.onclick = handleConnect;
