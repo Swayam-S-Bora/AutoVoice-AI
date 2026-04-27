@@ -1,4 +1,4 @@
-from app.services.booking_service import get_available_slots, create_booking
+from app.services.booking_service import get_available_slots, create_booking, update_booking
 from app.core.logger import log_action
 
 
@@ -27,4 +27,26 @@ def tool_create_booking(input_data: dict):
 
     result = create_booking(customer, date, start_time, service_type)
     log_action("create_booking", input_data, result)
+    return result
+
+
+def tool_update_booking(input_data: dict):
+    """
+    Updates an existing appointment for this phone number.
+    Args: {
+        "phone": str,
+        "updates": {
+            "date": "YYYY-MM-DD",          # optional
+            "start_time": "HH:MM",         # optional
+            "service_type": "basic|full",  # optional
+        }
+    }
+    Only the keys present in `updates` are changed.
+    Returns the updated appointment row or {"error": "..."}.
+    """
+    phone = input_data.get("phone")
+    updates = input_data.get("updates", {})
+
+    result = update_booking(phone, updates)
+    log_action("update_booking", input_data, result)
     return result
