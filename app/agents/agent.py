@@ -1,12 +1,11 @@
 """
 agent.py — streaming ReAct agent
 ---------------------------------
-Changes vs original:
 • run_agent_stream() is an async generator that yields audio bytes
 • LLM uses stream=True; first complete sentence is piped to TTS immediately
 • Tool calls (Supabase) run in executor so they don't block the event loop
 • Filler phrase is spoken *before* each tool call result arrives
-• All original state machine / action logic preserved
+• LLM output validated with Pydantic before any action is taken
 """
 from __future__ import annotations
 
@@ -17,34 +16,74 @@ from datetime import date as dt_date
 from typing import AsyncIterator
 
 from groq import Groq
+from pydantic import BaseModel, field_validator
 
 from app.core.config import settings
 from app.core.logger import agent_logger, error_logger
 from app.agents.prompts import build_system_prompt
-from app.agents.state import load_state, save_state, is_booking_ready
-from app.services.memory_service import get_recent_conversation, save_message
-from app.services.speech_service import text_to_speech_stream, pick_filler
-from app.tools.booking_tools import tool_get_slots, tool_create_booking
+from app.agents.state import load_state, save_state, is_booking_ready, _empty_state
+from app.services.memory_service import (
+    get_recent_conversation, save_message,
+    get_last_booking_summary, save_last_booking_summary,
+)
+from app.services.speech_service import (
+    text_to_speech_stream, pick_filler, pick_farewell,
+    pick_interruption, pick_greeting,
+)
+from app.tools.booking_tools import tool_get_slots, tool_create_booking, tool_update_booking
 from app.tools.vehicle_tools import get_vehicle_info
 
-# ---------------------------------------------------------------------------
 _groq = Groq(api_key=settings.GROQ_API_KEY)
 
 MAX_ITERATIONS = 8
 
 TOOLS = {
     "get_available_slots": tool_get_slots,
-    "create_booking": tool_create_booking,
-    "get_vehicle_info": get_vehicle_info,
+    "create_booking":      tool_create_booking,
+    "update_booking":      tool_update_booking,
+    "get_vehicle_info":    get_vehicle_info,
 }
 
-# Sentence-boundary regex — split on ., !, ? followed by space or end
-_SENTENCE_END = re.compile(r'(?<=[.!?])\s+|(?<=[.!?])$')
+_ALLOWED_ACTIONS: set[str] = {"update_state", "call_tool", "ask_user", "final_booking"}
+
+_GREETING_RE = re.compile(
+    r"^(hi|hello|hey|good\s?(morning|afternoon|evening)|howdy|hiya|yo)[\s!?.]*$"
+)
+
+# Keywords that signal the caller wants to modify an existing booking
+_MODIFY_RE = re.compile(
+    r"\b(reschedule|rescheduling|change|update|modify|move|shift|postpone|"
+    r"earlier|later|different\s+date|different\s+time|previous\s+booking|"
+    r"existing\s+booking|my\s+booking)\b",
+    re.IGNORECASE,
+)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# Pydantic schema
+class AgentResponse(BaseModel):
+    thought:       str = ""
+    action:        str
+    state_updates: dict = {}
+    tool_name:     str = ""
+    tool_args:     dict = {}
+    response:      str = ""
+
+    @field_validator("action")
+    @classmethod
+    def action_must_be_allowed(cls, v: str) -> str:
+        if v not in _ALLOWED_ACTIONS:
+            raise ValueError(f"Unknown action: {v!r}. Must be one of {_ALLOWED_ACTIONS}")
+        return v
+
+    @field_validator("tool_name")
+    @classmethod
+    def tool_name_must_be_known(cls, v: str) -> str:
+        if v and v not in TOOLS:
+            raise ValueError(f"Unknown tool: {v!r}. Must be one of {set(TOOLS)}")
+        return v
+
+
+# Slot formatting helper
 def format_slot_ranges(slots: list) -> str:
     if not slots:
         return ""
@@ -77,29 +116,8 @@ def format_slot_ranges(slots: list) -> str:
     return " and ".join(parts)
 
 
-def _empty_state(phone: str = None) -> dict:
-    return {
-        "name": None,
-        "phone": phone,
-        "car_model": None,
-        "service_type": None,
-        "date": None,
-        "time": None,
-        "slot_confirmed": False,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Streaming LLM helper — accumulates JSON and yields text as soon as
-# the "response" field value is sufficiently complete to speak.
-# ---------------------------------------------------------------------------
-async def _stream_llm_json(messages: list[dict]) -> tuple[str, dict]:
-    """
-    Streams LLM response. Returns (full_raw_json, parsed_dict).
-    Also yields nothing — caller uses the full parsed dict.
-    We need the whole JSON to safely act; streaming is used to minimize
-    wall-clock time to first-token for logging.
-    """
+# Streaming LLM helper
+async def _stream_llm_json(messages: list[dict]) -> str:
     loop = asyncio.get_event_loop()
 
     def _call():
@@ -111,21 +129,14 @@ async def _stream_llm_json(messages: list[dict]) -> tuple[str, dict]:
         )
 
     stream = await loop.run_in_executor(None, _call)
-
     raw = ""
     for chunk in stream:
         delta = chunk.choices[0].delta.content or ""
         raw += delta
-
     return raw
 
 
 async def _extract_response_sentences(response_text: str) -> AsyncIterator[str]:
-    """
-    Split a response string into sentences and yield each one.
-    This drives the sentence-by-sentence TTS pipeline.
-    """
-    # Split on sentence boundaries while keeping the delimiter
     parts = re.split(r'(?<=[.!?])\s+', response_text.strip())
     for part in parts:
         part = part.strip()
@@ -133,73 +144,120 @@ async def _extract_response_sentences(response_text: str) -> AsyncIterator[str]:
             yield part
 
 
-# ---------------------------------------------------------------------------
-# Tool execution (blocking calls wrapped in executor)
-# ---------------------------------------------------------------------------
+# Async wrappers for blocking Supabase calls
 async def _run_tool(tool_name: str, tool_args: dict) -> object:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, TOOLS[tool_name], tool_args)
 
-
 async def _load_state_async(phone: str) -> dict:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, load_state, phone)
-
+    return await asyncio.get_event_loop().run_in_executor(None, load_state, phone)
 
 async def _save_state_async(phone: str, state: dict) -> None:
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, save_state, phone, state)
-
+    await asyncio.get_event_loop().run_in_executor(None, save_state, phone, state)
 
 async def _get_history_async(phone: str) -> list:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_recent_conversation, phone)
-
+    return await asyncio.get_event_loop().run_in_executor(None, get_recent_conversation, phone)
 
 async def _save_message_async(phone: str, role: str, msg: str) -> None:
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, save_message, phone, role, msg)
+    await asyncio.get_event_loop().run_in_executor(None, save_message, phone, role, msg)
+
+async def _get_last_booking_async(phone: str) -> dict | None:
+    return await asyncio.get_event_loop().run_in_executor(None, get_last_booking_summary, phone)
+
+async def _save_last_booking_async(phone: str, summary: dict) -> None:
+    await asyncio.get_event_loop().run_in_executor(None, save_last_booking_summary, phone, summary)
 
 
-# ---------------------------------------------------------------------------
 # Main streaming agent entry point
-# ---------------------------------------------------------------------------
 async def run_agent_stream(
     user_input: str,
     phone: str,
     resolved_date: str | None = None,
 ) -> AsyncIterator[bytes]:
-    """
-    Async generator: yields raw PCM audio bytes for the agent's response.
-    Designed to be consumed by the WebSocket handler.
-    """
-    agent_logger.info(f"[{phone}] -- NEW TURN --")
-    agent_logger.info(f"[{phone}] User: {user_input}")
+    """Async generator: yields raw PCM audio bytes for the agent's response."""
+    agent_logger.info(f"[***{phone[-4:]}] -- NEW TURN --")
+    agent_logger.info(f"[***{phone[-4:]}] User: {user_input[:120]}")
 
     try:
-        # ── Load state & history concurrently ────────────────────────────
-        state, history = await asyncio.gather(
+        state, history, last_booking = await asyncio.gather(
             _load_state_async(phone),
             _get_history_async(phone),
+            _get_last_booking_async(phone),
         )
         state["phone"] = phone
 
-        if resolved_date and not state.get("date"):
+        # ── FIX 1: Greeting fast-path ────────────────────────────────────────
+        _state_is_empty = not any(
+            state.get(f) for f in ["name", "car_model", "service_type", "date", "time"]
+        )
+        if _state_is_empty and _GREETING_RE.match(user_input.strip().lower()):
+            agent_logger.info(f"[***{phone[-4:]}] Greeting fast-path triggered.")
+            greeting_text = pick_greeting()
+            await _save_message_async(phone, "user", user_input)
+            await _save_message_async(phone, "assistant", greeting_text)
+            async for chunk in text_to_speech_stream(greeting_text):
+                yield chunk
+            return
+
+        # ── FIX 6: Detect booking_intent on the first relevant turn ─────────
+        # If state has no intent yet, infer it from the current utterance.
+        # Once set, this persists in Supabase and the LLM always sees it.
+        if not state.get("booking_intent"):
+            if last_booking and _MODIFY_RE.search(user_input):
+                state["booking_intent"] = "modify"
+                agent_logger.info(f"[***{phone[-4:]}] Intent detected: modify")
+            else:
+                state["booking_intent"] = "new"
+                agent_logger.info(f"[***{phone[-4:]}] Intent detected: new")
+            await _save_state_async(phone, state)
+
+        # ── FIX 7: Guard resolved_date writes when awaiting a time ───────────
+        # _awaiting_time_selection is true when slots have been shown but
+        # slot_confirmed is still False. In that context any incoming
+        # resolved_date (e.g. "5.30 p.m." -> today) must be ignored.
+        _awaiting_time_selection = bool(
+            state.get("available_slots") and not state.get("slot_confirmed")
+        )
+
+        if resolved_date and not state.get("date") and not _awaiting_time_selection:
             state["date"] = resolved_date
             await _save_state_async(phone, state)
-            agent_logger.info(f"[{phone}] Date pre-resolved: {resolved_date}")
+            agent_logger.info(f"[***{phone[-4:]}] Date pre-resolved: {resolved_date}")
+        elif resolved_date and _awaiting_time_selection:
+            agent_logger.info(
+                f"[***{phone[-4:]}] Date pre-resolve SKIPPED (awaiting time): {resolved_date}"
+            )
+
+        # ── FIX 2: Always inject previous booking context ────────────────────
+        if last_booking:
+            ctx = (
+                f"SYSTEM: PREVIOUS_BOOKING on record for this caller - "
+                f"Name: {last_booking.get('name')}, "
+                f"Car: {last_booking.get('car_model')}, "
+                f"Service: {last_booking.get('service_type')}, "
+                f"Date: {last_booking.get('date')}, "
+                f"Time: {last_booking.get('time')}. "
+                f"booking_intent in state is '{state.get('booking_intent')}'. "
+                f"If intent is 'modify': use update_booking (NOT create_booking). "
+                f"If intent is 'new': ignore previous booking and collect fields fresh."
+            )
+            history.insert(0, {"role": "user", "content": ctx})
+            agent_logger.info(f"[***{phone[-4:]}] Injected last booking context (intent={state.get('booking_intent')}).")
 
         # Stale state guard
         if state.get("slot_confirmed") and is_booking_ready(state):
-            fresh_signals = ["hi", "hello", "hey", "i want", "want to book",
-                             "book a service", "book service", "new booking", "servicing"]
-            if any(s in user_input.lower() for s in fresh_signals):
-                agent_logger.info(f"[{phone}] Stale state with fresh intent — resetting.")
+            fresh_signals = [r"\bhi\b", r"\bhello\b", r"\bhey\b", r"\bnew booking\b",
+                             r"\bwant to book\b", r"\bbook.*service\b", r"\bservicing\b"]
+            if any(re.search(p, user_input.lower()) for p in fresh_signals):
+                agent_logger.info(f"[***{phone[-4:]}] Stale state with fresh intent — resetting.")
                 state = _empty_state(phone)
                 await _save_state_async(phone, state)
+                interruption_phrase = pick_interruption()
+                async for chunk in text_to_speech_stream(interruption_phrase):
+                    yield chunk
 
         await _save_message_async(phone, "user", user_input)
-        history.append({"role": "user", "content": user_input})
+        history.append({"role": "user", "content": f"[CALLER]: {user_input}"})
 
         today = dt_date.today().isoformat()
         system_prompt = build_system_prompt(today)
@@ -209,52 +267,98 @@ async def run_agent_stream(
 
         while iterations < MAX_ITERATIONS:
             iterations += 1
-            agent_logger.info(f"[{phone}] Iter {iterations} | State: {state}")
+            agent_logger.info(f"[***{phone[-4:]}] Iter {iterations} | State: {state}")
+
+            # Inject per-iteration context hints
+            context_hints = []
+            if _awaiting_time_selection:
+                context_hints.append(
+                    "SYSTEM: You are awaiting a TIME SELECTION. "
+                    "Interpret the caller's next utterance ONLY as a time of day. "
+                    "Do NOT update name, car_model, service_type, or date. "
+                    "If it cannot be mapped to a valid time, ask them to repeat."
+                )
+            if state.get("booking_intent") == "modify":
+                context_hints.append(
+                    "SYSTEM: booking_intent=modify. "
+                    "You MUST use update_booking, NOT create_booking. "
+                    "Do not collect name/car_model from scratch — use PREVIOUS_BOOKING values. "
+                    "Only collect the fields the caller explicitly wants to change."
+                )
+
+            hint_block = ("\n\n" + "\n".join(context_hints)) if context_hints else ""
 
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"CURRENT STATE:\n{json.dumps(state, indent=2)}"},
+                {"role": "system", "content": system_prompt + hint_block},
+                {"role": "user",   "content": f"CURRENT STATE:\n{json.dumps(state, indent=2)}"},
             ] + history
 
-            # ── Stream LLM response ────────────────────────────────────
             raw = await _stream_llm_json(messages)
-            agent_logger.info(f"[{phone}] LLM Raw: {raw}")
+            agent_logger.info(f"[***{phone[-4:]}] LLM Raw (first 300): {raw[:300]}")
 
             try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                error_logger.error(f"[{phone}] JSON parse failed: {raw}")
+                parsed_data = json.loads(raw)
+                parsed = AgentResponse(**parsed_data)
+            except (json.JSONDecodeError, Exception) as exc:
+                error_logger.error(f"[***{phone[-4:]}] LLM output invalid: {exc} | raw={raw[:200]}")
                 final_response = "Sorry, I had a hiccup. Could you say that again?"
                 break
 
-            thought       = parsed.get("thought", "")
-            action        = parsed.get("action", "")
-            state_updates = parsed.get("state_updates", {})
-            tool_name     = parsed.get("tool_name", "")
-            tool_args     = parsed.get("tool_args", {})
-            response_text = parsed.get("response", "")
+            thought       = parsed.thought
+            action        = parsed.action
+            state_updates = parsed.state_updates
+            tool_name     = parsed.tool_name
+            tool_args     = parsed.tool_args
+            response_text = parsed.response
 
-            agent_logger.info(f"[{phone}] Thought: {thought} | Action: {action}")
+            agent_logger.info(f"[***{phone[-4:]}] Thought: {thought} | Action: {action}")
 
-            # ── update_state ───────────────────────────────────────────
+            # ── update_state ───────────────────────────────────────────────
             if action == "update_state":
                 updated_fields = []
+                _protected_when_awaiting_time = {"name", "car_model", "service_type"}
+                # When modifying, name and car come from last_booking — don't let LLM overwrite
+                _protected_in_modify = {"name", "car_model"} if state.get("booking_intent") == "modify" and last_booking else set()
+
                 for key, value in state_updates.items():
                     if value is None or value == "":
                         continue
                     if str(value).startswith("<") or str(value).startswith("["):
-                        agent_logger.warning(f"[{phone}] Placeholder rejected: {key}={value}")
+                        agent_logger.warning(f"[***{phone[-4:]}] Placeholder rejected: {key}={value}")
+                        continue
+                    if _awaiting_time_selection and key in _protected_when_awaiting_time:
+                        agent_logger.warning(f"[***{phone[-4:]}] Field protection (time): refused {key}={value}")
+                        continue
+                    if key in _protected_in_modify and state.get(key) is None:
+                        # Auto-fill from last_booking rather than letting LLM decide
+                        inherited = last_booking.get(key)
+                        if inherited:
+                            state[key] = inherited
+                            updated_fields.append(f"{key}={inherited}(inherited)")
+                            agent_logger.info(f"[***{phone[-4:]}] State <- {key} = {inherited} (inherited from last_booking)")
                         continue
                     state[key] = value
                     updated_fields.append(f"{key}={value}")
-                    agent_logger.info(f"[{phone}] State <- {key} = {value}")
+                    agent_logger.info(f"[***{phone[-4:]}] State <- {key} = {value}")
+                    if key == "slot_confirmed" and value:
+                        _awaiting_time_selection = False
+
+                # For modify intent, auto-fill name/car from last_booking when still None
+                if state.get("booking_intent") == "modify" and last_booking:
+                    for field in ("name", "car_model", "service_type"):
+                        if state.get(field) is None:
+                            inherited = last_booking.get(field)
+                            if inherited:
+                                state[field] = inherited
+                                updated_fields.append(f"{field}={inherited}(auto)")
+                                agent_logger.info(f"[***{phone[-4:]}] Auto-filled {field}={inherited} from last_booking")
 
                 await _save_state_async(phone, state)
 
                 if updated_fields:
                     obs = (
                         f"SYSTEM: State updated — {', '.join(updated_fields)}. "
-                        f"Current state is now complete for: {[k for k,v in state.items() if v is not None and v is not False]}. "
+                        f"Filled: {[k for k,v in state.items() if v is not None and v is not False]}. "
                         f"Missing: {[k for k,v in state.items() if v is None]}. "
                         f"Do NOT update_state again unless user provides new info. Move to next step."
                     )
@@ -264,16 +368,29 @@ async def run_agent_stream(
                 history.append({"role": "user", "content": obs})
                 continue
 
-            # ── call_tool ──────────────────────────────────────────────
+            # ── call_tool ──────────────────────────────────────────────────
             elif action == "call_tool":
-                if tool_name not in TOOLS:
-                    error_logger.error(f"[{phone}] Unknown tool: {tool_name}")
+                if not tool_name:
+                    error_logger.error(f"[***{phone[-4:]}] call_tool with empty tool_name")
                     final_response = "Something went wrong. Please try again."
                     break
 
+                # Guard: modification intent must use update_booking, not create_booking
+                if tool_name == "create_booking" and state.get("booking_intent") == "modify":
+                    agent_logger.warning(f"[***{phone[-4:]}] create_booking blocked — intent is modify. Redirecting to update_booking.")
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: create_booking is BLOCKED for modify intent. "
+                            "You MUST call update_booking instead. "
+                            "Use the phone from state and only the fields the caller wants changed."
+                        )
+                    })
+                    continue
+
                 if tool_name == "create_booking" and not is_booking_ready(state):
                     missing = [k for k, v in state.items() if not v and k != "phone"]
-                    agent_logger.warning(f"[{phone}] create_booking blocked. Missing: {missing}")
+                    agent_logger.warning(f"[***{phone[-4:]}] create_booking blocked. Missing: {missing}")
                     history.append({
                         "role": "user",
                         "content": (
@@ -283,16 +400,14 @@ async def run_agent_stream(
                     })
                     continue
 
-                # ── Stream filler phrase BEFORE tool result ────────────
                 filler = pick_filler()
-                agent_logger.info(f"[{phone}] Filler: '{filler}'")
+                agent_logger.info(f"[***{phone[-4:]}] Filler: '{filler}'")
                 async for chunk in text_to_speech_stream(filler):
                     yield chunk
 
-                # ── Run the tool (async, non-blocking) ─────────────────
-                agent_logger.info(f"[{phone}] Tool: {tool_name} | Args: {tool_args}")
+                agent_logger.info(f"[***{phone[-4:]}] Tool: {tool_name} | Args: {tool_args}")
                 result = await _run_tool(tool_name, tool_args)
-                agent_logger.info(f"[{phone}] Tool result: {result}")
+                agent_logger.info(f"[***{phone[-4:]}] Tool result: {str(result)[:200]}")
 
                 if tool_name == "get_available_slots":
                     if not result:
@@ -318,16 +433,17 @@ async def run_agent_stream(
                         if is_fully_open:
                             obs = (
                                 "TOOL RESULT [get_available_slots]: "
-                                "No bookings on this date — all slots are open. "
-                                "Tell the user: slots available from 10 AM to 5 PM. Ask which time they prefer."
+                                "All slots open. Tell the user: slots available from 10 AM to 5 PM. "
+                                "Ask which time they prefer."
                             )
                         else:
                             obs = (
                                 f"TOOL RESULT [get_available_slots]: "
-                                f"Available start times grouped into ranges: {ranges}. "
-                                f"Individual available start times: {', '.join(slot_list)}. "
-                                f"Tell the user the available ranges. Ask which time they prefer."
+                                f"Available ranges: {ranges}. "
+                                f"Individual start times: {', '.join(slot_list)}. "
+                                f"Tell the user the ranges. Ask which time they prefer."
                             )
+                        _awaiting_time_selection = True
                     history.append({"role": "user", "content": obs})
 
                 elif tool_name == "create_booking":
@@ -338,28 +454,69 @@ async def run_agent_stream(
                         })
                         if fresh:
                             state["available_slots"] = [s["start_time"] for s in fresh]
+                            state["time"] = None
+                            state["slot_confirmed"] = False
+                            _awaiting_time_selection = True
                             await _save_state_async(phone, state)
                             ranges = format_slot_ranges(fresh)
                             obs = (
-                                f"TOOL RESULT [create_booking]: The slot the user requested is NOT available. "
-                                f"Available ranges on {state.get('date')}: {ranges}. "
-                                f"Reset time and slot_confirmed to null/false. "
-                                f"Tell the user that slot is taken and offer these ranges."
+                                f"TOOL RESULT [create_booking]: Slot NOT available. "
+                                f"Available on {state.get('date')}: {ranges}. "
+                                f"Tell the user the slot is taken, offer these ranges."
                             )
-                            state["time"] = None
-                            state["slot_confirmed"] = False
-                            await _save_state_async(phone, state)
                         else:
                             state["date"] = None
                             state["time"] = None
                             state["slot_confirmed"] = False
+                            _awaiting_time_selection = False
                             await _save_state_async(phone, state)
                             obs = (
-                                "TOOL RESULT [create_booking]: Slot not available and no other slots on that date. "
+                                "TOOL RESULT [create_booking]: No slots on that date. "
                                 "Date cleared. Ask the user to pick a different date."
                             )
                     else:
-                        obs = "TOOL RESULT [create_booking]: Booking confirmed successfully. Use final_booking action now."
+                        booking_summary = {
+                            "name":         state.get("name"),
+                            "car_model":    state.get("car_model"),
+                            "service_type": state.get("service_type"),
+                            "date":         state.get("date"),
+                            "time":         state.get("time"),
+                        }
+                        await _save_last_booking_async(phone, booking_summary)
+                        agent_logger.info(f"[***{phone[-4:]}] Last booking summary saved.")
+                        obs = "TOOL RESULT [create_booking]: Booking confirmed. Use final_booking now."
+                    history.append({"role": "user", "content": obs})
+
+                elif tool_name == "update_booking":
+                    if isinstance(result, dict) and "error" in result:
+                        alt_slots = result.get("available_slots", [])
+                        alt_date = result.get("date", state.get("date"))
+                        if alt_slots:
+                            ranges = format_slot_ranges(
+                                [{"start_time": t} for t in alt_slots]
+                            )
+                            state["available_slots"] = alt_slots
+                            _awaiting_time_selection = True
+                            await _save_state_async(phone, state)
+                            obs = (
+                                f"TOOL RESULT [update_booking]: Slot not available. "
+                                f"Available on {alt_date}: {ranges}. "
+                                f"Ask the user to pick a different time."
+                            )
+                        else:
+                            obs = f"TOOL RESULT [update_booking]: Update failed — {result['error']}. Let the user know."
+                    else:
+                        updated_appt = result if isinstance(result, dict) else {}
+                        booking_summary = {
+                            "name":         last_booking.get("name") if last_booking else state.get("name"),
+                            "car_model":    last_booking.get("car_model") if last_booking else state.get("car_model"),
+                            "service_type": updated_appt.get("service_type") or state.get("service_type"),
+                            "date":         updated_appt.get("appointment_date") or state.get("date"),
+                            "time":         updated_appt.get("start_time") or state.get("time"),
+                        }
+                        await _save_last_booking_async(phone, booking_summary)
+                        agent_logger.info(f"[***{phone[-4:]}] Last booking summary updated after modification.")
+                        obs = "TOOL RESULT [update_booking]: Booking updated in DB. Use final_booking now."
                     history.append({"role": "user", "content": obs})
 
                 elif tool_name == "get_vehicle_info":
@@ -368,36 +525,36 @@ async def run_agent_stream(
 
                 continue
 
-            # ── ask_user ───────────────────────────────────────────────
+            # ── ask_user ───────────────────────────────────────────────────
             elif action == "ask_user":
                 final_response = response_text
                 break
 
-            # ── final_booking ──────────────────────────────────────────
+            # ── final_booking ──────────────────────────────────────────────
             elif action == "final_booking":
                 final_response = response_text
+                farewell = pick_farewell()
+                if not final_response.rstrip().endswith(tuple(".!?")):
+                    final_response = final_response.rstrip() + ". "
+                else:
+                    final_response = final_response.rstrip() + " "
+                final_response += farewell
                 await _save_state_async(phone, _empty_state(phone))
-                agent_logger.info(f"[{phone}] Booking complete. State cleared.")
-                break
-
-            else:
-                agent_logger.error(f"[{phone}] Unknown action: {action}")
-                final_response = "I'm not sure how to help. Can you rephrase?"
+                agent_logger.info(f"[***{phone[-4:]}] Booking complete. State cleared.")
                 break
 
         if final_response is None:
-            agent_logger.warning(f"[{phone}] MAX_ITERATIONS hit.")
+            agent_logger.warning(f"[***{phone[-4:]}] MAX_ITERATIONS hit.")
             final_response = "Sorry, I'm having trouble. Could you try again?"
 
         await _save_message_async(phone, "assistant", final_response)
-        agent_logger.info(f"[{phone}] Response: {final_response}")
+        agent_logger.info(f"[***{phone[-4:]}] Response: {final_response[:120]}")
 
-        # ── Stream TTS sentence by sentence for minimum TTFA ──────────
         async for sentence in _extract_response_sentences(final_response):
             async for chunk in text_to_speech_stream(sentence):
                 yield chunk
 
     except Exception as e:
-        error_logger.error(f"[{phone}] Agent crash: {e}", exc_info=True)
+        error_logger.error(f"[***{phone[-4:]}] Agent crash: {e}", exc_info=True)
         async for chunk in text_to_speech_stream("Something went wrong. Please try again."):
             yield chunk
