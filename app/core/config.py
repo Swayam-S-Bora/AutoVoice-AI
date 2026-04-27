@@ -1,7 +1,9 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
@@ -9,5 +11,32 @@ class Settings:
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
+    ALLOWED_ORIGINS: list[str] = [
+        o.strip()
+        for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")
+        if o.strip()
+    ]
+
 
 settings = Settings()
+
+
+def validate_settings() -> None:
+    """
+    Validate required secrets at startup.
+    Exits immediately with a clear message rather than crashing on first API call.
+    """
+    required = {
+        "GROQ_API_KEY": settings.GROQ_API_KEY,
+        "SUPABASE_URL": settings.SUPABASE_URL,
+        "SUPABASE_KEY": settings.SUPABASE_KEY,
+        "DEEPGRAM_API_KEY": settings.DEEPGRAM_API_KEY,
+    }
+    missing = [k for k, v in required.items() if not v or v.startswith("your_")]
+    if missing:
+        print(
+            f"[STARTUP ERROR] Missing required environment variables: {', '.join(missing)}\n"
+            f"Copy example.env to .env and fill in real values.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
