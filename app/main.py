@@ -48,7 +48,11 @@ async def index():
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     ico_path = os.path.join(static_dir, "favicon.ico")
-    return FileResponse(ico_path, media_type="image/x-icon")
+    return FileResponse(
+        ico_path,
+        media_type="image/x-icon",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
 async def chrome_devtools_config():
