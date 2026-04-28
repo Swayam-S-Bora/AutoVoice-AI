@@ -4,7 +4,7 @@ speech_service.py
 STT  → Groq Whisper (whisper-large-v3-turbo)  [sync, called via executor]
 TTS  → Deepgram streaming TTS                  [async generator → audio bytes]
 
-Phrase cache: common short phrases are pre-generated at import time so the
+Phrase cache: common short phrases are pre-generated at startup so the
 very first audio byte for greetings / fillers is instant.
 """
 from __future__ import annotations
@@ -71,8 +71,12 @@ GREETING_PHRASES = [
     "Hey! Good to hear from you. What can I do for you today?",
 ]
 
-# All phrases eligible for pre-warming (filler + farewell + interruption + greeting)
+# All phrases eligible for caching.
 ALL_WARMABLE_PHRASES = THINKING_PHRASES + FAREWELL_PHRASES + INTERRUPTION_PHRASES + GREETING_PHRASES
+
+# Startup warming is intentionally small and sequential to avoid memory spikes
+# on 512 MB hosts. Less common phrases are cached lazily when first used.
+STARTUP_WARM_PHRASES = THINKING_PHRASES + GREETING_PHRASES
 
 
 def pick_filler() -> str:
@@ -95,31 +99,32 @@ def pick_greeting() -> str:
 _phrase_cache: dict[str, bytes] = {}
 
 
-async def _fetch_tts_bytes(text: str) -> bytes:
+async def _fetch_tts_bytes(client: httpx.AsyncClient, text: str) -> bytes:
     """Blocking Deepgram TTS fetch → bytes (used for cache warming only)."""
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            DEEPGRAM_TTS_URL,
-            headers=DEEPGRAM_HEADERS,
-            params=DEEPGRAM_PARAMS,
-            json={"text": text},
-        )
-        r.raise_for_status()
-        return r.content
+    r = await client.post(
+        DEEPGRAM_TTS_URL,
+        headers=DEEPGRAM_HEADERS,
+        params=DEEPGRAM_PARAMS,
+        json={"text": text},
+    )
+    r.raise_for_status()
+    return r.content
 
 
 async def warm_phrase_cache() -> None:
-    """Pre-generate audio for all warmable phrases (fillers, farewells, interruptions) at startup."""
-    tasks = {phrase: _fetch_tts_bytes(phrase) for phrase in ALL_WARMABLE_PHRASES}
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    """Pre-generate the most latency-sensitive phrases without a startup burst."""
     warmed = 0
-    for phrase, result in zip(tasks.keys(), results):
-        if isinstance(result, bytes):
+    async with httpx.AsyncClient(timeout=10) as client:
+        for phrase in STARTUP_WARM_PHRASES:
+            try:
+                result = await _fetch_tts_bytes(client, phrase)
+            except Exception as exc:
+                error_logger.warning(f"[TTS cache] Failed to warm '{phrase[:40]}': {exc}")
+                continue
             _phrase_cache[phrase] = result
             warmed += 1
-        else:
-            error_logger.warning(f"[TTS cache] Failed to warm '{phrase[:40]}': {result}")
-    app_logger.info(f"[TTS cache] Warmed {warmed}/{len(ALL_WARMABLE_PHRASES)} phrases.")
+            await asyncio.sleep(0)
+    app_logger.info(f"[TTS cache] Warmed {warmed}/{len(STARTUP_WARM_PHRASES)} startup phrases.")
 
 
 # STT — Groq Whisper (synchronous, run in executor from async context)

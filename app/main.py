@@ -7,6 +7,7 @@ from app.api.routes import router
 from app.services.speech_service import warm_phrase_cache
 from app.core.logger import app_logger
 from app.core.config import settings, validate_settings
+import asyncio
 import os
 
 # Validate secrets before anything else (exits cleanly if missing)
@@ -15,10 +16,14 @@ validate_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app_logger.info("Warming TTS phrase cache...")
-    await warm_phrase_cache()
+    app_logger.info("Starting TTS phrase cache warmup...")
+    warm_task = asyncio.create_task(warm_phrase_cache())
     app_logger.info("AutoVoice-AI ready.")
-    yield
+    try:
+        yield
+    finally:
+        if not warm_task.done():
+            warm_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
