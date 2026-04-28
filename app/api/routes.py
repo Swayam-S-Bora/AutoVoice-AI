@@ -30,7 +30,7 @@ router = APIRouter()
 
 # How long (seconds) to wait for another utterance before flushing the buffer
 # to the agent.  Keeps multi-sentence pauses merged; long silences still flush.
-COALESCE_WINDOW_S: float = 1.2
+COALESCE_WINDOW_S: float = 0.6
 
 
 # GET /auth/token — issue a short-lived token for a validated phone number
@@ -95,14 +95,14 @@ async def websocket_endpoint(
     phone: str,
     token: str = Query(...),
 ):
-    # ── Origin check ────────────────────────────────────────────────────────
+    # Origin check 
     origin = websocket.headers.get("origin", "")
     if origin and origin not in _cfg.ALLOWED_ORIGINS:
         await websocket.close(code=4003)
         access_logger.warning(f"[WS] Rejected foreign origin: {origin}")
         return
 
-    # ── Phone + token validation ─────────────────────────────────────────────
+    # Phone + token validation 
     phone = normalise_phone(phone)
     if not validate_phone(phone):
         await websocket.close(code=4000)
@@ -121,7 +121,7 @@ async def websocket_endpoint(
     audio_buffer_size: int = 0
     webm_header: bytes | None = None
 
-    # ── Coalescing buffer — merges rapid consecutive utterances ──────────────
+    #  Coalescing buffer — merges rapid consecutive utterances 
     # When the caller pauses mid-sentence and the browser fires END_OF_UTTERANCE
     # prematurely, we accumulate transcripts for COALESCE_WINDOW_S before
     # forwarding to the agent.  This prevents multiple "-- NEW TURN --" per
@@ -143,7 +143,19 @@ async def websocket_endpoint(
             return
 
         access_logger.info(f"[WS] ***{phone[-4:]} | flushing coalesced: '{combined[:80]}'")
-        async for audio_chunk in run_agent_stream(combined, phone, resolved_date=date_hint):
+
+        # Send agent response text as a text frame for UI captions
+        async def _send_agent_text(text: str):
+            try:
+                await websocket.send_text(f"agent:{text}")
+            except Exception:
+                pass
+
+        async for audio_chunk in run_agent_stream(
+            combined, phone,
+            resolved_date=date_hint,
+            text_callback=_send_agent_text,
+        ):
             await websocket.send_bytes(audio_chunk)
         await websocket.send_bytes(END_OF_RESPONSE)
 
@@ -156,7 +168,7 @@ async def websocket_endpoint(
         while True:
             data = await websocket.receive_bytes()
 
-            # ── End-of-utterance marker ──────────────────────────────────
+            # End-of-utterance marker 
             if data == END_OF_UTTERANCE:
                 if not audio_buffer:
                     continue
@@ -171,7 +183,7 @@ async def websocket_endpoint(
                 audio_buffer_size = 0
                 access_logger.info(f"[WS] ***{phone[-4:]} | audio bytes={len(raw_audio)}")
 
-                # ── Rate limit ───────────────────────────────────────────
+                # Rate limit
                 if not await check_stt_rate_limit(phone):
                     error_logger.warning(f"[WS] ***{phone[-4:]} | STT rate limit exceeded")
                     from app.services.speech_service import text_to_speech_stream
@@ -180,7 +192,7 @@ async def websocket_endpoint(
                     await websocket.send_bytes(END_OF_RESPONSE)
                     continue
 
-                # ── STT in executor (Groq Whisper is sync) ───────────────
+                # STT in executor (Groq Whisper is sync)
                 loop = asyncio.get_event_loop()
                 transcript = await loop.run_in_executor(
                     None, speech_to_text_sync, raw_audio, "audio/webm"
@@ -198,6 +210,12 @@ async def websocket_endpoint(
 
                 access_logger.info(f"[WS] ***{phone[-4:]} | STT ok: '{transcript[:60]}'")
 
+                # Send transcript to client immediately for user caption
+                try:
+                    await websocket.send_text(f"user:{transcript}")
+                except Exception:
+                    pass
+
                 safe_transcript = sanitise_transcript(transcript)
                 text, resolved_date = preprocess_input(safe_transcript)
 
@@ -213,7 +231,7 @@ async def websocket_endpoint(
                 coalesce_task = asyncio.ensure_future(_schedule_flush())
 
             else:
-                # ── Accumulate audio chunk with size cap ─────────────────
+                # Accumulate audio chunk with size cap
                 audio_buffer_size += len(data)
                 if audio_buffer_size > MAX_AUDIO_BUFFER_BYTES:
                     error_logger.warning(f"[WS] ***{phone[-4:]} | audio buffer overflow — closing")
