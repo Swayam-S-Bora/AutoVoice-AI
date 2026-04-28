@@ -173,8 +173,14 @@ async def run_agent_stream(
     user_input: str,
     phone: str,
     resolved_date: str | None = None,
+    text_callback=None,          # async callable(str) — called with the final response text
 ) -> AsyncIterator[bytes]:
-    """Async generator: yields raw PCM audio bytes for the agent's response."""
+    """Async generator: yields raw PCM audio bytes for the agent's response.
+
+    If *text_callback* is provided it is awaited with the agent's text reply
+    just before audio synthesis begins, so the UI can show a caption without
+    waiting for the full audio stream.
+    """
     agent_logger.info(f"[***{phone[-4:]}] -- NEW TURN --")
     agent_logger.info(f"[***{phone[-4:]}] User: {user_input[:120]}")
 
@@ -186,7 +192,7 @@ async def run_agent_stream(
         )
         state["phone"] = phone
 
-        # ── FIX 1: Greeting fast-path ────────────────────────────────────────
+        #  FIX 1: Greeting fast-path
         _state_is_empty = not any(
             state.get(f) for f in ["name", "car_model", "service_type", "date", "time"]
         )
@@ -195,11 +201,13 @@ async def run_agent_stream(
             greeting_text = pick_greeting()
             await _save_message_async(phone, "user", user_input)
             await _save_message_async(phone, "assistant", greeting_text)
+            if text_callback:
+                await text_callback(greeting_text)
             async for chunk in text_to_speech_stream(greeting_text):
                 yield chunk
             return
 
-        # ── FIX 6: Detect booking_intent on the first relevant turn ─────────
+        # ── FIX 6: Detect booking_intent on the first relevant turn 
         # If state has no intent yet, infer it from the current utterance.
         # Once set, this persists in Supabase and the LLM always sees it.
         if not state.get("booking_intent"):
@@ -211,7 +219,7 @@ async def run_agent_stream(
                 agent_logger.info(f"[***{phone[-4:]}] Intent detected: new")
             await _save_state_async(phone, state)
 
-        # ── FIX 7: Guard resolved_date writes when awaiting a time ───────────
+        # ── FIX 7: Guard resolved_date writes when awaiting a time 
         # _awaiting_time_selection is true when slots have been shown but
         # slot_confirmed is still False. In that context any incoming
         # resolved_date (e.g. "5.30 p.m." -> today) must be ignored.
@@ -228,7 +236,7 @@ async def run_agent_stream(
                 f"[***{phone[-4:]}] Date pre-resolve SKIPPED (awaiting time): {resolved_date}"
             )
 
-        # ── FIX 2: Always inject previous booking context ────────────────────
+        # FIX 2: Always inject previous booking context
         if last_booking:
             ctx = (
                 f"SYSTEM: PREVIOUS_BOOKING on record for this caller - "
@@ -313,7 +321,7 @@ async def run_agent_stream(
 
             agent_logger.info(f"[***{phone[-4:]}] Thought: {thought} | Action: {action}")
 
-            # ── update_state ───────────────────────────────────────────────
+            # update_state 
             if action == "update_state":
                 updated_fields = []
                 _protected_when_awaiting_time = {"name", "car_model", "service_type"}
@@ -368,7 +376,7 @@ async def run_agent_stream(
                 history.append({"role": "user", "content": obs})
                 continue
 
-            # ── call_tool ──────────────────────────────────────────────────
+            # call_tool
             elif action == "call_tool":
                 if not tool_name:
                     error_logger.error(f"[***{phone[-4:]}] call_tool with empty tool_name")
@@ -525,12 +533,12 @@ async def run_agent_stream(
 
                 continue
 
-            # ── ask_user ───────────────────────────────────────────────────
+            # ask_user 
             elif action == "ask_user":
                 final_response = response_text
                 break
 
-            # ── final_booking ──────────────────────────────────────────────
+            # final_booking 
             elif action == "final_booking":
                 final_response = response_text
                 farewell = pick_farewell()
@@ -549,6 +557,9 @@ async def run_agent_stream(
 
         await _save_message_async(phone, "assistant", final_response)
         agent_logger.info(f"[***{phone[-4:]}] Response: {final_response[:120]}")
+
+        if text_callback:
+            await text_callback(final_response)
 
         async for sentence in _extract_response_sentences(final_response):
             async for chunk in text_to_speech_stream(sentence):
