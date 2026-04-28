@@ -107,8 +107,8 @@ def sanitise_transcript(text: str) -> str:
     return " ".join(clean_lines).strip()
 
 
-# Audio buffer cap (bytes) — ~2 MB ≈ ~4 min of 64kbps WebM audio
-MAX_AUDIO_BUFFER_BYTES = 2 * 1024 * 1024
+# Audio buffer cap (bytes) - 512 KB is ample for short push-to-talk clips.
+MAX_AUDIO_BUFFER_BYTES = 512 * 1024
 
 
 # Per-connection STT rate limit (in-process, resets on process restart)
