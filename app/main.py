@@ -23,9 +23,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ---------------------------------------------------------------------------
 # CORS — only allow configured origins
-# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -51,3 +49,7 @@ async def index():
 async def favicon():
     ico_path = os.path.join(static_dir, "favicon.ico")
     return FileResponse(ico_path, media_type="image/x-icon")
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def chrome_devtools_config():
+    return {}
