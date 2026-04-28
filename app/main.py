@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from app.api.routes import router
 from app.services.speech_service import warm_phrase_cache
 from app.core.logger import app_logger
@@ -43,6 +43,21 @@ if os.path.isdir(static_dir):
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(static_dir, "index.html"))
+
+
+@app.head("/")
+async def index_head():
+    return Response(status_code=200)
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    return {"status": "ok"}
+
+
+@app.head("/healthz", include_in_schema=False)
+async def healthz_head():
+    return Response(status_code=200)
 
 
 @app.get("/favicon.ico", include_in_schema=False)

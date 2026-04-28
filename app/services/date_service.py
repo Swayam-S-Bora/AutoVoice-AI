@@ -9,7 +9,9 @@ Strategy:
 """
 import dateparser
 import re
+from calendar import monthrange
 from datetime import datetime
+from dateparser.search import search_dates
 from app.core.logger import app_logger
 
 
@@ -44,6 +46,47 @@ _DATE_BLACKLIST = re.compile(
     re.IGNORECASE,
 )
 
+# Cheap gate before invoking dateparser. dateparser can be surprisingly slow
+# on non-date phrases, especially on low-CPU hosts, so only call it when the
+# utterance has a real date cue.
+_DATE_CUE_PATTERN = re.compile(
+    r"""
+    \b(
+        today|tomorrow|tonight|yesterday|
+        next|this|coming|after|from\s+now|
+        day|week|month|year|
+        mon(day)?|tue(sday)?|wed(nesday)?|thu(rsday)?|fri(day)?|sat(urday)?|sun(day)?|
+        jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|
+        aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?
+    )\b
+    |
+    \b\d{1,2}(st|nd|rd|th)\b
+    |
+    \b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b
+    |
+    \b\d{4}-\d{1,2}-\d{1,2}\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_DAY_ONLY_PATTERN = re.compile(r"^\s*(on\s+)?(?P<day>\d{1,2})(st|nd|rd|th)?\s*$", re.IGNORECASE)
+
+
+def _future_day_only(day: int, base: datetime) -> datetime | None:
+    """Resolve bare day-of-month phrases like '17th' to the next future date."""
+    year, month = base.year, base.month
+    for _ in range(13):
+        max_day = monthrange(year, month)[1]
+        if day <= max_day:
+            candidate = datetime(year, month, day)
+            if candidate.date() >= base.date():
+                return candidate
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
+    return None
+
 
 def resolve_date(text: str) -> str | None:
     """
@@ -77,14 +120,27 @@ def resolve_date(text: str) -> str | None:
             app_logger.info(f"[date_service] Skipping time-phrase-only input: '{text}'")
             return None
 
-    result = dateparser.parse(
-        text,
-        settings={
+    if not _DATE_CUE_PATTERN.search(stripped):
+        app_logger.info(f"[date_service] Skipping no-date-cue input: '{text}'")
+        return None
+
+    base = datetime.now()
+
+    day_only = _DAY_ONLY_PATTERN.match(stripped)
+    if day_only:
+        result = _future_day_only(int(day_only.group("day")), base)
+    else:
+        settings = {
             "PREFER_DATES_FROM": "future",   # "tomorrow" -> tomorrow, not yesterday
             "RETURN_AS_TIMEZONE_AWARE": False,
-            "RELATIVE_BASE": datetime.now(),
+            "RELATIVE_BASE": base,
         }
-    )
+        matches = search_dates(stripped, settings=settings, languages=["en"])
+        result = matches[0][1] if matches else dateparser.parse(
+            stripped,
+            settings=settings,
+            languages=["en"],
+        )
 
     if result:
         resolved = result.strftime("%Y-%m-%d")
