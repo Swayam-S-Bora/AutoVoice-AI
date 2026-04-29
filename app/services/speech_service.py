@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import random
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -132,23 +133,38 @@ async def warm_phrase_cache() -> None:
 # Whisper hallucinates text on silence or very short clips. These are known
 # phantom outputs (non-English fragments, filler words) that should be dropped.
 _WHISPER_HALLUCINATIONS = {
-    "thank you.",
-    "thank you",
-    "thanks.",
-    "thanks",
-    "you",
+    # Silence/noise phantoms
     ".",
     "",
-    "bye.",
-    "bye",
     "...",
     "ugh",
+    "hmm.",
+    "hmm",
+    "um.",
+    "um",
+    "uh.",
+    "uh"
 }
 
-# Minimum raw audio size to bother sending to Whisper.
-# WebM header alone is ~600 bytes; real speech adds at least ~3 KB per second.
-# Clips under this threshold are almost certainly silence or mic tap noise.
-_MIN_AUDIO_BYTES = 4_000
+# Minimum words after stripping punctuation/noise. Keep this at 1 so genuine
+# single-word answers like "Frank" or "tomorrow" are accepted.
+_MIN_REAL_WORD_COUNT = 1   # allow single real words like "Frank" or "tomorrow"
+
+# Raised from 4 KB to 6 KB to better reject very short noise bursts.
+_MIN_AUDIO_BYTES = 6_000
+
+# Whisper initial prompt — primes the model with Indian automotive context so
+# that Indian names, car brands, and accented English transcribe more accurately.
+# This does NOT lock content; Whisper still transcribes freely.
+_WHISPER_PROMPT = (
+    "Automobile service booking in India. "
+    "Common names: Rahul, Priya, Amit, Neha, Ravi, Suresh, Ananya, Vijay, Pooja, Arjun, "
+    "Sanjay, Deepak, Meena, Karan, Divya, Rohit, Sunita, Ajay, Kavya, Prakash. "
+    "Car brands: Tata Nexon, Tata Punch, Tata Altroz, Maruti Swift, Maruti Baleno, "
+    "Maruti Brezza, Hyundai Creta, Hyundai i20, Mahindra XUV, Honda City, "
+    "Kia Seltos, Toyota Innova, Renault Kwid. "
+    "Services: basic service, full service, oil change."
+)
 
 
 def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> str | None:
@@ -160,6 +176,7 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
     - Minimum byte length gate (drop near-silence clips)
     - language="en" to prevent Whisper switching to non-English on ambiguous audio
     - Hallucination filter for known phantom outputs
+    - Minimum real-word count after stripping punctuation/noise
     """
     if len(audio_bytes) < _MIN_AUDIO_BYTES:
         app_logger.info(f"[STT] Skipped — audio too short ({len(audio_bytes)} bytes)")
@@ -173,10 +190,11 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
             file=audio_file,
             response_format="text",
             language="en",          # pin to English — stops non-Latin hallucinations
+            prompt=_WHISPER_PROMPT, # primes model for Indian names/car brands/accents
         )
         text = (transcript.strip() if isinstance(transcript, str) else transcript.text.strip())
 
-        # Drop known Whisper hallucinations on silence/noise
+        # Drop known Whisper hallucinations on silence/noise (case-insensitive)
         if text.lower() in _WHISPER_HALLUCINATIONS:
             app_logger.info(f"[STT] Hallucination filtered: '{text}'")
             return None
@@ -186,6 +204,11 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
             text.encode("ascii")
         except UnicodeEncodeError:
             app_logger.info(f"[STT] Non-ASCII hallucination filtered: '{text}'")
+            return None
+
+        real_word_count = len(re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", text))
+        if real_word_count < _MIN_REAL_WORD_COUNT:
+            app_logger.info(f"[STT] Too few real words filtered: '{text}'")
             return None
 
         app_logger.info(f"[STT] '{text}'")

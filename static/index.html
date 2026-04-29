@@ -70,7 +70,7 @@
       z-index: 999;
     }
 
-    /* ── HEADER ── */
+    /*  HEADER  */
     header {
       position: relative;
       z-index: 10;
@@ -140,7 +140,7 @@
     .status-pill.error { color: var(--red); border-color: var(--red); }
     @keyframes blink-dot { 0%,100%{opacity:1} 50%{opacity:.25} }
 
-    /* ── MAIN ── */
+    /*  MAIN  */
     main {
       position: relative;
       z-index: 10;
@@ -150,7 +150,7 @@
       overflow: hidden;
     }
 
-    /* ── LEFT PANEL ── */
+    /*  LEFT PANEL  */
     .panel-left {
       display: flex;
       flex-direction: column;
@@ -339,7 +339,7 @@
       margin-bottom: 1px;
     }
 
-    /* ── RIGHT PANEL ── */
+    /*  RIGHT PANEL  */
     .panel-right {
       display: flex;
       flex-direction: column;
@@ -491,7 +491,7 @@
       30%        {transform:translateY(-6px);opacity:1}
     }
 
-    /* ── FOOTER ── */
+    /*  FOOTER  */
     footer {
       position: relative;
       z-index: 10;
@@ -537,7 +537,7 @@
       letter-spacing: 0.1em;
     }
 
-    /* ── MOBILE (≤ 680px) ── */
+    /*  MOBILE (≤ 680px)  */
     @media (max-width: 680px) {
       main {
         grid-template-columns: 1fr;
@@ -661,11 +661,11 @@
   </footer>
 
 <script>
-// ── CONFIG ──────────────────────────────────────────────────────────────────
+//  CONFIG
 const SAMPLE_RATE     = 24000;
 const END_OF_RESPONSE = new Uint8Array([0xFF, 0xFE]);
 
-// ── DOM ──────────────────────────────────────────────────────────────────────
+//  DOM 
 const phoneInput = document.getElementById('phone-input');
 const connectBtn = document.getElementById('connect-btn');
 const micBtn     = document.getElementById('mic-btn');
@@ -683,7 +683,7 @@ const hSess      = document.getElementById('h-sess');
 const fSys       = document.getElementById('f-sys');
 const fMsgs      = document.getElementById('f-msgs');
 
-// ── STATE ────────────────────────────────────────────────────────────────────
+//  STATE 
 let ws            = null;
 let mediaRecorder = null;
 let micStream     = null;
@@ -699,7 +699,7 @@ let msgCount      = 0;
 let sessTimer     = null;
 let sessStart     = null;
 
-// ── CANVAS SIZING ─────────────────────────────────────────────────────────────
+//  CANVAS SIZING
 function sizeCanvas() {
   const mobile = window.innerWidth <= 680;
   const sz = mobile
@@ -710,7 +710,7 @@ function sizeCanvas() {
 sizeCanvas();
 window.addEventListener('resize', () => { sizeCanvas(); });
 
-// ── STATUS ────────────────────────────────────────────────────────────────────
+//  STATUS 
 function setStatus(msg, cls = '') {
   statusText.textContent = msg;
   statusPill.className   = 'status-pill' + (cls ? ' ' + cls : '');
@@ -724,7 +724,7 @@ function showError(msg) {
   setTimeout(() => { errLine.textContent = ''; }, 4500);
 }
 
-// ── TIMER ─────────────────────────────────────────────────────────────────────
+//  TIMER 
 function startTimer() {
   sessStart = Date.now();
   sessTimer = setInterval(() => {
@@ -734,7 +734,7 @@ function startTimer() {
 }
 function stopTimer() { clearInterval(sessTimer); hSess.textContent = '--:--'; }
 
-// ── MESSAGES ──────────────────────────────────────────────────────────────────
+//  MESSAGES
 function ts() {
   return new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
@@ -780,7 +780,7 @@ function showTyping() {
 }
 function hideTyping() { if (_typingEl) { _typingEl.remove(); _typingEl = null; } }
 
-// ── VISUALIZER ────────────────────────────────────────────────────────────────
+//  VISUALIZER
 function startViz(stream) {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
   analyser = audioCtx.createAnalyser();
@@ -833,7 +833,7 @@ function drawViz() {
   ctx2d.stroke();
 }
 
-// ── PCM PLAYBACK ──────────────────────────────────────────────────────────────
+//  PCM PLAYBACK
 function ensureAudioCtx() {
   if (!audioCtx || audioCtx.state === 'closed')
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
@@ -879,7 +879,7 @@ function isEOR(d) {
   return v[0] === 0xFF && v[1] === 0xFE;
 }
 
-// ── WEBSOCKET ─────────────────────────────────────────────────────────────────
+//  WEBSOCKET
 async function connect(phone) {
   setStatus('CONNECTING…');
   let token;
@@ -893,8 +893,16 @@ async function connect(phone) {
   ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(phone)}?token=${encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     setStatus('READY', 'active');
+    // Acquire mic once on connect with track muted — pre-warms the stream
+    // so startRecording() has zero init latency, but no audio is captured
+    // until the button is held (track.enabled = false until then).
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micStream.getAudioTracks().forEach(t => { t.enabled = false; });
+      startViz(micStream);
+    } catch { showError('Mic access denied'); }
     micBtn.disabled = false;
     connectBtn.textContent = 'END';
     connectBtn.classList.add('disc');
@@ -935,33 +943,29 @@ function disconnect() {
   if (micStream)     { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   stopViz();
   if (ws) ws.close();
+  ws = null;
 }
 
-// ── MIC ───────────────────────────────────────────────────────────────────────
-async function ensureMic() {
-  if (micStream?.active) return micStream;
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  startViz(micStream);
-  return micStream;
-}
-
-async function startRecording() {
+//  MIC
+function startRecording() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  try {
-    const stream   = await ensureMic();
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-    mediaRecorder  = new MediaRecorder(stream, { mimeType, bitsPerSecond: 64000 });
-    mediaRecorder.ondataavailable = (ev) => {
-      if (ev.data.size > 0 && ws?.readyState === WebSocket.OPEN) ws.send(ev.data);
-    };
-    mediaRecorder.start(100);
-    micBtn.classList.add('recording');
-    setStatus('RECORDING', 'recording');
-  } catch { showError('Mic access denied'); }
+  if (!micStream) { showError('Mic not ready'); return; }
+  // Unmute the track — no audio was flowing into the OS buffer before this point
+  micStream.getAudioTracks().forEach(t => { t.enabled = true; });
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+  mediaRecorder  = new MediaRecorder(micStream, { mimeType, bitsPerSecond: 64000 });
+  mediaRecorder.ondataavailable = (ev) => {
+    if (ev.data.size > 0 && ws?.readyState === WebSocket.OPEN) ws.send(ev.data);
+  };
+  mediaRecorder.start(100);
+  micBtn.classList.add('recording');
+  setStatus('RECORDING', 'recording');
 }
 
 function stopRecording() {
   if (!mediaRecorder) return;
+  // Mute the track immediately — stops audio flowing before MediaRecorder.stop() fires
+  if (micStream) micStream.getAudioTracks().forEach(t => { t.enabled = false; });
   mediaRecorder.stop(); mediaRecorder = null;
   micBtn.classList.remove('recording');
   if (ws?.readyState === WebSocket.OPEN) {
@@ -973,7 +977,7 @@ function stopRecording() {
   }
 }
 
-// ── WIRING ────────────────────────────────────────────────────────────────────
+//  WIRING 
 function handleConnect() {
   const phone = phoneInput.value.trim();
   if (!phone)              { showError('Enter your phone number'); return; }
