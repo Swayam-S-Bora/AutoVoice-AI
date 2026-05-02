@@ -31,7 +31,6 @@ from app.services.speech_service import (
     pick_interruption, pick_greeting,
 )
 from app.tools.booking_tools import tool_get_slots, tool_create_booking, tool_update_booking
-from app.tools.vehicle_tools import get_vehicle_info
 
 _groq = Groq(api_key=settings.GROQ_API_KEY)
 
@@ -41,7 +40,6 @@ TOOLS = {
     "get_available_slots": tool_get_slots,
     "create_booking":      tool_create_booking,
     "update_booking":      tool_update_booking,
-    "get_vehicle_info":    get_vehicle_info,
 }
 
 _ALLOWED_ACTIONS: set[str] = {"update_state", "call_tool", "ask_user", "final_booking"}
@@ -583,10 +581,6 @@ async def run_agent_stream(
                         await _save_last_booking_async(phone, booking_summary)
                         agent_logger.info(f"[***{phone[-4:]}] Last booking summary updated after modification.")
                         obs = "TOOL RESULT [update_booking]: Booking updated in DB. Use final_booking now."
-                    history.append({"role": "user", "content": obs})
-
-                elif tool_name == "get_vehicle_info":
-                    obs = f"TOOL RESULT [get_vehicle_info]: {json.dumps(result)}"
                     history.append({"role": "user", "content": obs})
 
                 continue
