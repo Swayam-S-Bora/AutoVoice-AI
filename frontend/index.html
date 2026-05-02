@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>AutoVoice AI — Service Booking</title>
+  <link rel="icon" href="/frontend/favicon.ico" type="image/x-icon" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <link rel="stylesheet" href="/frontend/styles.css" />
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo">
+      <span class="logo-word w1">Auto</span><span class="logo-word w2">Voice</span>
+      <span class="logo-badge">AI</span>
+    </div>
+    <div class="status-pill" id="status-pill">
+      <div class="dot"></div>
+      <span id="status-text">OFFLINE</span>
+    </div>
+  </header>
+
+  <!-- MAIN -->
+  <main>
+
+    <!-- LEFT: Controls -->
+    <div class="panel-left">
+      <div class="brk brk-tl"></div>
+      <div class="brk brk-tr"></div>
+      <div class="brk brk-bl"></div>
+      <div class="brk brk-br"></div>
+
+      <!-- Visualizer -->
+      <div class="viz-wrap" id="viz-wrap">
+        <canvas id="viz"></canvas>
+        <button id="mic-btn" disabled title="Hold to speak">🎙️</button>
+      </div>
+
+      <!-- Right side of left panel -->
+      <div style="display:flex;flex-direction:column;align-items:center;gap:clamp(12px,2.5vh,24px);width:100%;max-width:300px;">
+
+        <div class="wave-bars" id="wave-bars">
+          <span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+        </div>
+
+        <div class="connect-block">
+          <div class="field-label">Phone Number</div>
+          <div class="input-row">
+            <input id="phone-input" type="tel" placeholder="Enter number…" autocomplete="tel" inputmode="tel" />
+            <button id="connect-btn">CONNECT</button>
+          </div>
+          <div class="err-line" id="err-line"></div>
+        </div>
+
+        <div class="mic-hint">
+          <em id="mic-state">STAND BY</em>
+          <kbd>HOLD</kbd> mic to speak &nbsp;·&nbsp; <kbd>RELEASE</kbd> to send
+        </div>
+
+      </div>
+    </div>
+
+    <!-- RIGHT: Transcript -->
+    <div class="panel-right">
+      <div class="panel-hdr">
+        <span class="panel-hdr-title">TRANSCRIPT / <em>LIVE SESSION</em></span>
+        <div class="panel-hdr-right">
+          <span class="hdr-stat">MSGS <strong id="h-msgs">0</strong></span>
+        </div>
+      </div>
+      <div id="log">
+        <div class="empty-state" id="log-empty">
+          <div class="empty-icon">📡</div>
+          <div class="empty-text">
+            Connect and hold the mic<br/>to start your session
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer>
+    <span class="f-stat">SYS <strong id="f-sys">READY</strong></span>
+    <div class="f-divider"></div>
+    <span class="f-stat">MSGS <strong id="f-msgs">0</strong></span>
+    <div class="f-divider"></div>
+    <span class="f-stat">AUDIO <strong>PCM / 24 KHz</strong></span>
+    <div class="f-divider"></div>
+    <span class="f-stat"><strong>WS/WSS</strong></span>
+  </footer>
+
+<!-- RECEIPT MODAL -->
+<div id="receipt-overlay">
+  <div id="receipt-modal">
+    <div class="receipt-hdr">
+      <span class="receipt-hdr-title">📄 Booking Receipt</span>
+      <button class="receipt-close" onclick="closeReceipt()">✕ CLOSE</button>
+    </div>
+    <div class="receipt-body">
+      <div class="receipt-card" id="receipt-card">
+        <div class="receipt-card-header">
+          <div class="receipt-logo">AutoVoice AI</div>
+          <div class="receipt-subtitle">Automotive Service Booking</div>
+          <div class="receipt-confirmed-badge">Booking Confirmed</div>
+        </div>
+        <div class="receipt-rows" id="receipt-rows"></div>
+        <div class="receipt-ref" id="receipt-ref"></div>
+      </div>
+      <div class="receipt-actions">
+        <button class="btn-receipt btn-receipt-primary" onclick="downloadReceiptPDF()">⬇ Download PDF</button>
+        <button class="btn-receipt btn-receipt-secondary" onclick="closeReceipt()">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/frontend/app.js"></script>
+</body>
+</html>
