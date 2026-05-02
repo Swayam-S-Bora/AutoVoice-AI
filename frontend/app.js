@@ -360,22 +360,22 @@ function parseBookingFromText(text) {
 
   // Service type — ordered from most-specific to least-specific
   const servicePatterns = [
+    // Qualified service: "basic service", "full car service", etc.
     /\b((?:basic|full|general|major|minor|standard|premium|comprehensive|express)\s+(?:car\s+)?servi(?:ce|cing))\b/i,
+    // Specific job types
     /\b(oil\s*(?:and\s*filter\s*)?change|tyre\s+(?:rotation|swap|change|replacement)|wheel\s+(?:alignment|balancing)|brake\s+(?:inspection|service|check|replacement)|battery\s+(?:check|replacement|service)|AC\s+(?:service|regas|repair)|air\s+con(?:ditioning)?\s+(?:service|repair)|car\s+wash|detailing|diagnostics?|engine\s+service|transmission\s+service|coolant\s+(?:flush|service)|clutch\s+(?:service|replacement))\b/i,
-    /\b((?:\w+\s+){0,2}servi(?:ce|cing))\b/i,
   ];
   data.service = 'Automotive Service';
   for (const p of servicePatterns) {
     const m = text.match(p);
     if (m) {
       const raw = m[1].trim();
-      if (/^(?:the\s+)?servi(?:ce|cing)$/i.test(raw)) continue;
       data.service = raw.replace(/\b\w/g, c => c.toUpperCase());
       break;
     }
   }
 
-  // Date — "May 5", "5th May", "2026-05-05", "05/05/2026"
+  // Date — "May 5", "5th May", "2026-05-05", "05/05/2026", relative words
   const datePatterns = [
     /(\d{4}-\d{2}-\d{2})/,
     /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/,
@@ -385,7 +385,33 @@ function parseBookingFromText(text) {
   ];
   for (const p of datePatterns) {
     const m = text.match(p);
-    if (m) { data.date = m[1]; break; }
+    if (m) {
+      let raw = m[1];
+      // Convert ISO format (2026-05-05) to a human-readable string
+      if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+        const d = new Date(raw + 'T00:00:00');
+        raw = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+      }
+      // Resolve relative day words to actual dates
+      const relMap = { today: 0, tomorrow: 1, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+      const relKey = raw.toLowerCase();
+      if (relMap[relKey] !== undefined && relKey !== 'today' && relKey !== 'tomorrow') {
+        const now = new Date();
+        const target = relMap[relKey]; // day-of-week index (Sun=0)
+        const cur = now.getDay();
+        const diff = (target - cur + 7) % 7 || 7;
+        now.setDate(now.getDate() + diff);
+        raw = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+      } else if (relKey === 'tomorrow') {
+        const now = new Date();
+        now.setDate(now.getDate() + 1);
+        raw = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+      } else if (relKey === 'today') {
+        raw = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+      }
+      data.date = raw;
+      break;
+    }
   }
   if (!data.date) data.date = 'As Scheduled';
 
