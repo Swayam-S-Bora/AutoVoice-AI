@@ -8,15 +8,15 @@
 [![Deepgram](https://img.shields.io/badge/TTS-Deepgram-00C8FF)](https://deepgram.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Voice-first AI receptionist for automobile service booking and booking updates.
+Voice-first AI receptionist for automobile service booking.
 
 ## Live Project
 `https://autovoice-ai.onrender.com`
 
 ## Screenshots
-![Home Screen](docs/screenshots/home.png)
-![Live Conversation](docs/screenshots/live-conversation.png)
-![Booking Receipt](docs/screenshots/booking-receipt.png)
+![Home Screen](docs/home.png)
+![Live Conversation](docs/live-conversation.png)
+![Booking Receipt](docs/booking-receipt.png)
 
 ## What this project does
 - Accepts live caller audio from a browser UI.
@@ -37,8 +37,7 @@ Voice-first AI receptionist for automobile service booking and booking updates.
 7. Agent response text is converted to streaming audio and sent back over the WebSocket connection.
 
 ## Architecture
-<!-- Replace with your architecture diagram image -->
-![Architecture Diagram](docs/architecture/architecture.png)
+![Architecture Diagram](docs/architecture.png)
 
 ## Tech Stack
 - Backend Framework: FastAPI (`0.136.1`)
