@@ -59,6 +59,11 @@ _MODIFY_RE = re.compile(
 )
 
 
+# In-memory intent cache: phone -> "new" | "modify"
+# Guards against DB load failures causing intent to flip mid-session.
+# Cleared when final_booking completes or the process restarts.
+_intent_cache: dict = {}
+
 # Pydantic schema
 class AgentResponse(BaseModel):
     thought:       str = ""
@@ -207,16 +212,33 @@ async def run_agent_stream(
                 yield chunk
             return
 
-        # ── FIX 6: Detect booking_intent on the first relevant turn 
-        # If state has no intent yet, infer it from the current utterance.
-        # Once set, this persists in Supabase and the LLM always sees it.
-        if not state.get("booking_intent"):
+        # ── Intent detection — set ONCE per session, never overwritten ──────────
+        # Priority order:
+        #   1. Already in DB-loaded state (normal case)
+        #   2. In-memory cache (DB load failed but same process/session)
+        #   3. Detect from current utterance (first relevant turn only)
+        # "modify" is only set when the caller's FIRST non-greeting message
+        # contains explicit modify keywords AND a previous booking exists.
+        # All subsequent turns with "new" words must NOT re-evaluate intent.
+        if state.get("booking_intent"):
+            # State from DB already has intent — sync cache
+            _intent_cache[phone] = state["booking_intent"]
+        elif phone in _intent_cache:
+            # DB load returned empty but we have it in memory — restore it
+            state["booking_intent"] = _intent_cache[phone]
+            agent_logger.info(
+                f"[***{phone[-4:]}] Intent restored from cache: {_intent_cache[phone]}"
+            )
+            await _save_state_async(phone, state)
+        else:
+            # First relevant turn — detect from utterance
             if last_booking and _MODIFY_RE.search(user_input):
                 state["booking_intent"] = "modify"
                 agent_logger.info(f"[***{phone[-4:]}] Intent detected: modify")
             else:
                 state["booking_intent"] = "new"
                 agent_logger.info(f"[***{phone[-4:]}] Intent detected: new")
+            _intent_cache[phone] = state["booking_intent"]
             await _save_state_async(phone, state)
 
         # ── FIX 7: Guard resolved_date writes when awaiting a time 
@@ -286,7 +308,13 @@ async def run_agent_stream(
                     "Do NOT update name, car_model, service_type, or date. "
                     "If it cannot be mapped to a valid time, ask them to repeat."
                 )
-            if state.get("booking_intent") == "modify":
+            # Use cache as fallback in case state.booking_intent was lost
+            _effective_intent_hint = state.get("booking_intent") or _intent_cache.get(phone)
+            if _effective_intent_hint == "modify":
+                # Also correct state in-memory if it somehow lost the intent
+                if state.get("booking_intent") != "modify":
+                    state["booking_intent"] = "modify"
+                    agent_logger.warning(f"[***{phone[-4:]}] Intent corrected to 'modify' from cache in iter {iterations}")
                 context_hints.append(
                     "SYSTEM: booking_intent=modify. "
                     "You MUST use update_booking, NOT create_booking. "
@@ -324,9 +352,19 @@ async def run_agent_stream(
             # update_state 
             if action == "update_state":
                 updated_fields = []
-                _protected_when_awaiting_time = {"name", "car_model", "service_type"}
-                # When modifying, name and car come from last_booking — don't let LLM overwrite
-                _protected_in_modify = {"name", "car_model"} if state.get("booking_intent") == "modify" and last_booking else set()
+                _booking_fields = {"name", "car_model", "service_type", "date", "time", "slot_confirmed"}
+                _any_booking_field_changed = False
+
+                # ── Pre-pass: apply time + slot_confirmed first so field protection
+                # lifts within the same update batch before other fields are processed.
+                for key, value in state_updates.items():
+                    if key in ("time", "slot_confirmed") and value not in (None, "", False):
+                        if str(value).startswith("<") or str(value).startswith("["):
+                            continue
+                        state[key] = value
+                        if key == "slot_confirmed" and value:
+                            _awaiting_time_selection = False
+                            agent_logger.info(f"[***{phone[-4:]}] _awaiting_time_selection lifted (pre-pass)")
 
                 for key, value in state_updates.items():
                     if value is None or value == "":
@@ -334,24 +372,21 @@ async def run_agent_stream(
                     if str(value).startswith("<") or str(value).startswith("["):
                         agent_logger.warning(f"[***{phone[-4:]}] Placeholder rejected: {key}={value}")
                         continue
-                    if _awaiting_time_selection and key in _protected_when_awaiting_time:
+                    # Only protect name/car_model/service_type while still awaiting a time;
+                    # the pre-pass above already lifted _awaiting_time_selection if time/slot arrived.
+                    if _awaiting_time_selection and key in {"name", "car_model", "service_type"}:
                         agent_logger.warning(f"[***{phone[-4:]}] Field protection (time): refused {key}={value}")
                         continue
-                    if key in _protected_in_modify and state.get(key) is None:
-                        # Auto-fill from last_booking rather than letting LLM decide
-                        inherited = last_booking.get(key)
-                        if inherited:
-                            state[key] = inherited
-                            updated_fields.append(f"{key}={inherited}(inherited)")
-                            agent_logger.info(f"[***{phone[-4:]}] State <- {key} = {inherited} (inherited from last_booking)")
-                        continue
+
                     state[key] = value
                     updated_fields.append(f"{key}={value}")
                     agent_logger.info(f"[***{phone[-4:]}] State <- {key} = {value}")
                     if key == "slot_confirmed" and value:
                         _awaiting_time_selection = False
+                    if key in _booking_fields and key != "slot_confirmed":
+                        _any_booking_field_changed = True
 
-                # For modify intent, auto-fill name/car from last_booking when still None
+                # For modify intent, auto-fill name/car/service from last_booking when still None
                 if state.get("booking_intent") == "modify" and last_booking:
                     for field in ("name", "car_model", "service_type"):
                         if state.get(field) is None:
@@ -361,6 +396,12 @@ async def run_agent_stream(
                                 updated_fields.append(f"{field}={inherited}(auto)")
                                 agent_logger.info(f"[***{phone[-4:]}] Auto-filled {field}={inherited} from last_booking")
 
+                # Reset booking_confirmed whenever a booking-relevant field changes
+                if _any_booking_field_changed and state.get("booking_confirmed"):
+                    state["booking_confirmed"] = False
+                    updated_fields.append("booking_confirmed=false(reset)")
+                    agent_logger.info(f"[***{phone[-4:]}] booking_confirmed reset due to field change")
+
                 await _save_state_async(phone, state)
 
                 if updated_fields:
@@ -368,6 +409,7 @@ async def run_agent_stream(
                         f"SYSTEM: State updated — {', '.join(updated_fields)}. "
                         f"Filled: {[k for k,v in state.items() if v is not None and v is not False]}. "
                         f"Missing: {[k for k,v in state.items() if v is None]}. "
+                        f"booking_confirmed={state.get('booking_confirmed')}. "
                         f"Do NOT update_state again unless user provides new info. Move to next step."
                     )
                 else:
@@ -384,7 +426,9 @@ async def run_agent_stream(
                     break
 
                 # Guard: modification intent must use update_booking, not create_booking
-                if tool_name == "create_booking" and state.get("booking_intent") == "modify":
+                # Check both state AND in-memory cache in case state was corrupted by a DB load failure
+                _effective_intent = state.get("booking_intent") or _intent_cache.get(phone)
+                if tool_name == "create_booking" and _effective_intent == "modify":
                     agent_logger.warning(f"[***{phone[-4:]}] create_booking blocked — intent is modify. Redirecting to update_booking.")
                     history.append({
                         "role": "user",
@@ -392,6 +436,19 @@ async def run_agent_stream(
                             "SYSTEM: create_booking is BLOCKED for modify intent. "
                             "You MUST call update_booking instead. "
                             "Use the phone from state and only the fields the caller wants changed."
+                        )
+                    })
+                    continue
+
+                # Guard: must have explicit caller confirmation before booking
+                if tool_name in ("create_booking", "update_booking") and not state.get("booking_confirmed"):
+                    agent_logger.warning(f"[***{phone[-4:]}] {tool_name} blocked — booking_confirmed is False.")
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            f"SYSTEM: {tool_name} is BLOCKED — booking_confirmed is False. "
+                            "You MUST read back all booking details to the caller and ask them "
+                            "to confirm before proceeding. Use ask_user action with the full summary."
                         )
                     })
                     continue
@@ -515,9 +572,10 @@ async def run_agent_stream(
                             obs = f"TOOL RESULT [update_booking]: Update failed — {result['error']}. Let the user know."
                     else:
                         updated_appt = result if isinstance(result, dict) else {}
+                        # Prefer state values for name/car_model (caller may have updated them)
                         booking_summary = {
-                            "name":         last_booking.get("name") if last_booking else state.get("name"),
-                            "car_model":    last_booking.get("car_model") if last_booking else state.get("car_model"),
+                            "name":         state.get("name") or (last_booking.get("name") if last_booking else None),
+                            "car_model":    state.get("car_model") or (last_booking.get("car_model") if last_booking else None),
                             "service_type": updated_appt.get("service_type") or state.get("service_type"),
                             "date":         updated_appt.get("appointment_date") or state.get("date"),
                             "time":         updated_appt.get("start_time") or state.get("time"),
@@ -548,7 +606,8 @@ async def run_agent_stream(
                     final_response = final_response.rstrip() + " "
                 final_response += farewell
                 await _save_state_async(phone, _empty_state(phone))
-                agent_logger.info(f"[***{phone[-4:]}] Booking complete. State cleared.")
+                _intent_cache.pop(phone, None)  # clear in-memory intent so next call starts fresh
+                agent_logger.info(f"[***{phone[-4:]}] Booking complete. State + intent cache cleared.")
                 break
 
         if final_response is None:

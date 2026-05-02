@@ -43,7 +43,7 @@ THINKING_PHRASES = [
     "One moment please.",
     "Let me look that up for you.",
     "Just a second while I check.",
-    "Hold on, let me pull that up.",
+    "Hold on a minute.",
     "Right, give me just a moment.",
 ]
 

@@ -85,9 +85,11 @@ def create_booking(customer, date, start_time, service_type):
 def update_booking(phone: str, updates: dict):
     """
     Find the most recent 'booked' appointment for this phone and update it.
-    `updates` may contain: date, start_time, service_type.
+    `updates` may contain: date, start_time, service_type, name, car_model.
+    - name / car_model are patched on the customers table.
+    - date / start_time / service_type are patched on the appointments table.
     Recalculates end_time whenever start_time or service_type changes.
-    Returns the updated row or {"error": "..."}.
+    Returns the updated appointment row or {"error": "..."}.
     """
     try:
         app_logger.info(f"Updating booking | phone=***{phone[-4:]} | updates={updates}")
@@ -103,6 +105,35 @@ def update_booking(phone: str, updates: dict):
             return {"error": "No customer found for this phone number."}
 
         customer_id = cust_res.data[0]["id"]
+
+        # --- Patch customer profile fields if supplied ---
+        customer_patch = {}
+        if "name" in updates and updates["name"]:
+            customer_patch["name"] = updates["name"]
+        if "car_model" in updates and updates["car_model"]:
+            customer_patch["car_model"] = updates["car_model"]
+
+        if customer_patch:
+            supabase.table("customers") \
+                .update(customer_patch) \
+                .eq("id", customer_id) \
+                .execute()
+            app_logger.info(f"Customer profile updated: {customer_patch}")
+
+        # --- Patch appointment fields if supplied ---
+        appt_updates = {k: v for k, v in updates.items()
+                        if k not in ("name", "car_model") and v}
+
+        if not appt_updates:
+            # Only customer fields were changed — fetch and return the appointment row
+            appt_res = supabase.table("appointments") \
+                .select("*") \
+                .eq("customer_id", customer_id) \
+                .eq("status", "booked") \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+            return appt_res.data[0] if appt_res.data else {"error": "No active booking found."}
 
         # Find the most recent booked appointment
         appt_res = supabase.table("appointments") \
@@ -121,15 +152,15 @@ def update_booking(phone: str, updates: dict):
 
         # Build the patch dict — only update what was supplied
         patch = {}
-        new_date = updates.get("date") or existing["appointment_date"]
-        new_start = updates.get("start_time") or existing["start_time"]
-        new_service = updates.get("service_type") or existing["service_type"]
+        new_date = appt_updates.get("date") or existing["appointment_date"]
+        new_start = appt_updates.get("start_time") or existing["start_time"]
+        new_service = appt_updates.get("service_type") or existing["service_type"]
 
-        if "date" in updates:
+        if "date" in appt_updates:
             patch["appointment_date"] = new_date
-        if "start_time" in updates:
+        if "start_time" in appt_updates:
             patch["start_time"] = new_start
-        if "service_type" in updates:
+        if "service_type" in appt_updates:
             patch["service_type"] = new_service
 
         if not patch:
@@ -146,7 +177,7 @@ def update_booking(phone: str, updates: dict):
         if (new_date == existing["appointment_date"]
                 and new_start_time == existing["start_time"]
                 and new_service == existing["service_type"]):
-            # Nothing meaningful changed — succeed without touching DB
+            # Nothing meaningful changed in appointment — succeed without touching DB
             return existing
 
         if new_start_time not in available_times:

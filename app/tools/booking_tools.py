@@ -39,9 +39,12 @@ def tool_update_booking(input_data: dict):
             "date": "YYYY-MM-DD",          # optional
             "start_time": "HH:MM",         # optional
             "service_type": "basic|full",  # optional
+            "name": str,                   # optional — updates customer profile
+            "car_model": str,              # optional — updates customer profile
         }
     }
     Only the keys present in `updates` are changed.
+    name/car_model patch the customers table; date/time/service patch the appointments table.
     Returns the updated appointment row or {"error": "..."}.
     """
     phone = input_data.get("phone")
