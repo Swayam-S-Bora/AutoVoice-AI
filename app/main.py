@@ -39,15 +39,15 @@ app.add_middleware(
 
 app.include_router(router)
 
-# Serve static frontend
-static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Serve frontend
+frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.isdir(frontend_dir):
+    app.mount("/frontend", StaticFiles(directory=frontend_dir), name="frontend")
 
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(static_dir, "index.html"))
+    return FileResponse(os.path.join(frontend_dir, "index.html"))
 
 
 @app.head("/")
@@ -67,7 +67,7 @@ async def healthz_head():
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    ico_path = os.path.join(static_dir, "favicon.ico")
+    ico_path = os.path.join(frontend_dir, "favicon.ico")
     return FileResponse(
         ico_path,
         media_type="image/x-icon",
