@@ -11,7 +11,7 @@
 Voice-first AI receptionist for automobile service booking.
 
 ## Live Project
-`https://autovoice-ai.onrender.com`
+https://autovoice-ai.onrender.com
 
 ## Screenshots
 ![Home Screen](docs/home.png)
