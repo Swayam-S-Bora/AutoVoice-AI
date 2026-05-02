@@ -337,7 +337,7 @@ async def run_agent_stream(
                 parsed = AgentResponse(**parsed_data)
             except (json.JSONDecodeError, Exception) as exc:
                 error_logger.error(f"[***{phone[-4:]}] LLM output invalid: {exc} | raw={raw[:200]}")
-                final_response = "Sorry, I had a hiccup. Could you say that again?"
+                final_response = "Sorry, could you say that again?"
                 break
 
             thought       = parsed.thought
