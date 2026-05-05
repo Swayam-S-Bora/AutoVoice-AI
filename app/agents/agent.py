@@ -489,23 +489,12 @@ async def run_agent_stream(
                             int(s["start_time"].split(":")[0]) * 60 + int(s["start_time"].split(":")[1])
                             for s in result
                         )
-                        is_fully_open = all(
-                            all_starts[i+1] - all_starts[i] == 30
-                            for i in range(len(all_starts) - 1)
+                        obs = (
+                            f"TOOL RESULT [get_available_slots]: "
+                            f"Available ranges: {ranges}. "
+                            f"Individual start times: {', '.join(slot_list)}. "
+                            f"Tell the user the ranges. Ask which time they prefer."
                         )
-                        if is_fully_open:
-                            obs = (
-                                "TOOL RESULT [get_available_slots]: "
-                                "All slots open. Tell the user: slots available from 10 AM to 5 PM. "
-                                "Ask which time they prefer."
-                            )
-                        else:
-                            obs = (
-                                f"TOOL RESULT [get_available_slots]: "
-                                f"Available ranges: {ranges}. "
-                                f"Individual start times: {', '.join(slot_list)}. "
-                                f"Tell the user the ranges. Ask which time they prefer."
-                            )
                         _awaiting_time_selection = True
                     history.append({"role": "user", "content": obs})
 
@@ -599,6 +588,18 @@ async def run_agent_stream(
                 else:
                     final_response = final_response.rstrip() + " "
                 final_response += farewell
+
+                # structured receipt data for frontend
+                if text_callback:
+                    receipt_payload = json.dumps({
+                        "name":         state.get("name"),
+                        "car_model":    state.get("car_model"),
+                        "service_type": state.get("service_type"),
+                        "date":         state.get("date"),   # YYYY-MM-DD
+                        "time":         state.get("time"),   # HH:MM
+                    }, ensure_ascii=False)
+                    await text_callback(f"booking_confirmed:{receipt_payload}")
+
                 await _save_state_async(phone, _empty_state(phone))
                 _intent_cache.pop(phone, None)  # clear in-memory intent so next call starts fresh
                 agent_logger.info(f"[***{phone[-4:]}] Booking complete. State + intent cache cleared.")
