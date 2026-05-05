@@ -144,10 +144,13 @@ async def websocket_endpoint(
 
         access_logger.info(f"[WS] ***{phone[-4:]} | flushing coalesced: '{combined[:80]}'")
 
-        # Send agent response text as a text frame for UI captions
+        # Send agent response text as a text frame for UI captions.
         async def _send_agent_text(text: str):
             try:
-                await websocket.send_text(f"agent:{text}")
+                if text.startswith("booking_confirmed:"):
+                    await websocket.send_text(text)
+                else:
+                    await websocket.send_text(f"agent:{text}")
             except Exception:
                 pass
 
