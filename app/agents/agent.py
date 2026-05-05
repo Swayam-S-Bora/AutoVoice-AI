@@ -32,7 +32,7 @@ from app.services.speech_service import (
 )
 from app.tools.booking_tools import tool_get_slots, tool_create_booking, tool_update_booking
 
-_groq = Groq(api_key=settings.GROQ_API_KEY)
+_groq_clients = [Groq(api_key=key) for key in settings.GROQ_API_KEYS]
 
 MAX_ITERATIONS = 8
 
@@ -119,24 +119,31 @@ def format_slot_ranges(slots: list) -> str:
     return " and ".join(parts)
 
 
-# Streaming LLM helper
+# Streaming LLM helper — tries each Groq key in order, falls back on failure
 async def _stream_llm_json(messages: list[dict]) -> str:
     loop = asyncio.get_event_loop()
+    last_exc: Exception | None = None
 
-    def _call():
-        return _groq.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=messages,
-            temperature=0.2,
-            stream=True,
-        )
+    for i, client in enumerate(_groq_clients):
+        def _call(c=client):
+            return c.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=messages,
+                temperature=0.2,
+                stream=True,
+            )
+        try:
+            stream = await loop.run_in_executor(None, _call)
+            raw = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                raw += delta
+            return raw
+        except Exception as exc:
+            error_logger.warning(f"[GROQ] Key {i + 1} failed: {exc}. Trying next key...")
+            last_exc = exc
 
-    stream = await loop.run_in_executor(None, _call)
-    raw = ""
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        raw += delta
-    return raw
+    raise RuntimeError(f"All {len(_groq_clients)} Groq API keys failed.") from last_exc
 
 
 async def _extract_response_sentences(response_text: str) -> AsyncIterator[str]:

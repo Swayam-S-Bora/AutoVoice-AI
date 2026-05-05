@@ -6,7 +6,17 @@ load_dotenv()
 
 
 class Settings:
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_API_KEYS: list[str] = [
+        key.strip()
+        for key in [
+            os.getenv("GROQ_API_KEY", ""),
+            os.getenv("GROQ_API_KEY_2", ""),
+            os.getenv("GROQ_API_KEY_3", ""),
+            os.getenv("GROQ_API_KEY_4", ""),
+            os.getenv("GROQ_API_KEY_5", ""),
+        ]
+        if key.strip()
+    ]
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
@@ -26,8 +36,14 @@ def validate_settings() -> None:
     Validate required secrets at startup.
     Exits immediately with a clear message rather than crashing on first API call.
     """
+    if not settings.GROQ_API_KEYS:
+        print(
+            "[STARTUP ERROR] Missing required environment variable: GROQ_API_KEY\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     required = {
-        "GROQ_API_KEY": settings.GROQ_API_KEY,
         "SUPABASE_URL": settings.SUPABASE_URL,
         "SUPABASE_KEY": settings.SUPABASE_KEY,
         "DEEPGRAM_API_KEY": settings.DEEPGRAM_API_KEY,
