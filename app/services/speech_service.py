@@ -22,7 +22,7 @@ from app.core.config import settings
 from app.core.logger import app_logger, error_logger
 
 # Clients
-_groq = Groq(api_key=settings.GROQ_API_KEY)
+_groq = Groq(api_key=settings.GROQ_API_KEYS[0])
 
 DEEPGRAM_TTS_URL = "https://api.deepgram.com/v1/speak"
 DEEPGRAM_HEADERS = {
