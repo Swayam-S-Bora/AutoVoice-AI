@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from typing import Literal
 
 WORK_START = 10
 WORK_END = 19
