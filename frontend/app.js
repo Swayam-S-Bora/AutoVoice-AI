@@ -102,9 +102,10 @@ function addMsg(role, text) {
 
   // Check if this agent message is a booking confirmation → generate receipt
   if (role === 'agent') {
-    const receiptData = parseBookingFromText(text);
+    // Prefer the structured payload sent by the backend over regex parsing
+    const receiptData = _pendingReceiptData || parseBookingFromText(text);
+    _pendingReceiptData = null;  // consume it
     if (receiptData) {
-      // Small delay so the message renders first
       setTimeout(() => injectReceiptIntoMessage(el, receiptData), 350);
     }
   }
@@ -259,6 +260,46 @@ async function connect(phone) {
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') {
       if      (ev.data.startsWith('user:'))  addMsg('user',  ev.data.slice(5));
+      else if (ev.data.startsWith('booking_confirmed:')) {
+        // Structured receipt payload from backend — use directly, no regex parsing
+        try {
+          const raw = JSON.parse(ev.data.slice('booking_confirmed:'.length));
+          // Normalise service_type → human-readable label
+          const svcMap = { full: 'Full Service', basic: 'Basic Service' };
+          const svc = svcMap[raw.service_type?.toLowerCase()] || raw.service_type || 'Automotive Service';
+          // Parse date from YYYY-MM-DD with explicit parts to avoid timezone/year issues
+          let dateLabel = raw.date || 'As Scheduled';
+          if (raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)) {
+            const [y, m, d] = raw.date.split('-').map(Number);
+            dateLabel = new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+              day: '2-digit', month: 'short', year: 'numeric'
+            });
+          }
+          // Normalise HH:MM time to "3:00 PM" style
+          let timeLabel = raw.time || 'As Scheduled';
+          if (raw.time && /^\d{2}:\d{2}$/.test(raw.time)) {
+            const [h, min] = raw.time.split(':').map(Number);
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const h12 = h % 12 || 12;
+            timeLabel = min === 0 ? `${h12} ${suffix}` : `${h12}:${String(min).padStart(2,'0')} ${suffix}`;
+          }
+          _pendingReceiptData = {
+            service:     svc,
+            date:        dateLabel,
+            time:        timeLabel,
+            name:        raw.name  || null,
+            vehicle:     raw.car_model || null,
+            phone:       null,
+            ref:         'AV-' + Date.now().toString(36).toUpperCase().slice(-6),
+            generatedAt: new Date().toLocaleString('en-IN', {
+              day: '2-digit', month: 'short', year: 'numeric',
+              hour: '2-digit', minute: '2-digit', hour12: true,
+            }),
+          };
+        } catch(e) {
+          console.warn('Failed to parse booking_confirmed payload', e);
+        }
+      }
       else if (ev.data.startsWith('agent:')) addMsg('agent', ev.data.slice(6));
       return;
     }
@@ -341,111 +382,38 @@ micBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(
 micBtn.addEventListener('touchend',   e => { e.preventDefault(); stopRecording(); },  { passive: false });
 
 //  RECEIPT LOGIC 
-let _lastReceiptData = null;
+let _lastReceiptData    = null;
+let _pendingReceiptData = null;  // set by booking_confirmed: WS frame before agent text arrives
 
 /**
  * Parse booking details from agent confirmation messages.
  * Looks for keywords like "confirmed", "booked", service types,
  * dates, times, and customer names.
  */
+// parseBookingFromText — minimal fallback only.
+// In normal flow the backend sends a structured booking_confirmed:{json} frame
+// which populates _pendingReceiptData directly. This function is only reached
+// if that frame is missing (e.g. /chat debug endpoint, which has no text_callback).
 function parseBookingFromText(text) {
   const lower = text.toLowerCase();
-
-  // Must look like a confirmation
-  const isConfirmation = /\b(confirmed|booked|appointment|booking|scheduled|reservation)\b/.test(lower)
-    && /\b(confirmed|success|done|scheduled|set up|all set|good to go)\b/.test(lower);
+  const isConfirmation =
+    /\b(confirmed|booked|booking|scheduled)\b/.test(lower) &&
+    /\b(confirmed|done|scheduled|all set|go ahead)\b/.test(lower);
   if (!isConfirmation) return null;
 
-  const data = {};
-
-  // Service type — ordered from most-specific to least-specific
-  const servicePatterns = [
-    // Qualified service: "basic service", "full car service", etc.
-    /\b((?:basic|full|general|major|minor|standard|premium|comprehensive|express)\s+(?:car\s+)?servi(?:ce|cing))\b/i,
-    // Specific job types
-    /\b(oil\s*(?:and\s*filter\s*)?change|tyre\s+(?:rotation|swap|change|replacement)|wheel\s+(?:alignment|balancing)|brake\s+(?:inspection|service|check|replacement)|battery\s+(?:check|replacement|service)|AC\s+(?:service|regas|repair)|air\s+con(?:ditioning)?\s+(?:service|repair)|car\s+wash|detailing|diagnostics?|engine\s+service|transmission\s+service|coolant\s+(?:flush|service)|clutch\s+(?:service|replacement))\b/i,
-  ];
-  data.service = 'Automotive Service';
-  for (const p of servicePatterns) {
-    const m = text.match(p);
-    if (m) {
-      const raw = m[1].trim();
-      data.service = raw.replace(/\b\w/g, c => c.toUpperCase());
-      break;
-    }
-  }
-
-  // Date — "May 5", "5th May", "2026-05-05", "05/05/2026", relative words
-  const datePatterns = [
-    /(\d{4}-\d{2}-\d{2})/,
-    /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/,
-    /\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s*(?:\d{4})?)\b/i,
-    /\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?)\b/i,
-    /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
-  ];
-  for (const p of datePatterns) {
-    const m = text.match(p);
-    if (m) {
-      let raw = m[1];
-      // Convert ISO format (2026-05-05) to a human-readable string
-      if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-        const d = new Date(raw + 'T00:00:00');
-        raw = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
-      }
-      // Resolve relative day words to actual dates
-      const relMap = { today: 0, tomorrow: 1, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
-      const relKey = raw.toLowerCase();
-      if (relMap[relKey] !== undefined && relKey !== 'today' && relKey !== 'tomorrow') {
-        const now = new Date();
-        const target = relMap[relKey]; // day-of-week index (Sun=0)
-        const cur = now.getDay();
-        const diff = (target - cur + 7) % 7 || 7;
-        now.setDate(now.getDate() + diff);
-        raw = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
-      } else if (relKey === 'tomorrow') {
-        const now = new Date();
-        now.setDate(now.getDate() + 1);
-        raw = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
-      } else if (relKey === 'today') {
-        raw = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
-      }
-      data.date = raw;
-      break;
-    }
-  }
-  if (!data.date) data.date = 'As Scheduled';
-
-  // Time — "10:00 AM", "14:30", "2 PM"
-  const timeMatch = text.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM)?|\d{1,2}\s*(?:AM|PM))\b/i);
-  data.time = timeMatch ? timeMatch[1].toUpperCase() : 'As Scheduled';
-
-  // Name — "for [Name]", "[Name]'s booking"
-  const namePatterns = [
-    /\bfor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/,
-    /\bname[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
-    /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'s\s+(?:appointment|booking)\b/,
-  ];
-  for (const p of namePatterns) {
-    const m = text.match(p);
-    if (m && !['The','Your','This','Our'].includes(m[1])) { data.name = m[1]; break; }
-  }
-
-  // Car / vehicle
-  const carMatch = text.match(/\b([A-Z][a-zA-Z]+\s+(?:Swift|Baleno|Celerio|Alto|Dzire|Ertiga|Vitara|Brezza|Fronx|Jimny|Nexon|Altroz|Harrier|Safari|Tiago|Tigor|Punch|Creta|Venue|i20|i10|Aura|Verna|Tucson|Innova|Fortuner|Corolla|Camry|City|Amaze|Jazz|WR-V|Civic|CR-V|Seltos|Sonet|Carnival|EV6|[A-Z0-9]{2,5}))\b/);
-  data.vehicle = carMatch ? carMatch[0] : null;
-
-  // Phone (last 4 digits shown)
-  const phoneMatch = text.match(/(?:\+91|0)?[789]\d{9}|\b\d{10}\b/);
-  data.phone = phoneMatch ? phoneMatch[0] : null;
-
-  // Generate reference number
-  data.ref = 'AV-' + Date.now().toString(36).toUpperCase().slice(-6);
-  data.generatedAt = new Date().toLocaleString('en-IN', {
-    day:'2-digit', month:'short', year:'numeric',
-    hour:'2-digit', minute:'2-digit', hour12: true
-  });
-
-  return data;
+  return {
+    service:     'Automotive Service',
+    date:        'As Scheduled',
+    time:        'As Scheduled',
+    name:        null,
+    vehicle:     null,
+    phone:       null,
+    ref:         'AV-' + Date.now().toString(36).toUpperCase().slice(-6),
+    generatedAt: new Date().toLocaleString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    }),
+  };
 }
 
 function buildReceiptRows(data) {
@@ -494,100 +462,47 @@ document.getElementById('receipt-overlay').addEventListener('click', function(e)
   if (e.target === this) closeReceipt();
 });
 
-function downloadReceiptPDF() {
+async function downloadReceiptPDF() {
   if (!_lastReceiptData) return;
   const d = _lastReceiptData;
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'mm', format: 'a5', orientation: 'portrait' });
 
-  const W = 148, H = 210;
-  const lx = 14, rx = W - 14;
-  const headerH = 48;
+  const btn = document.querySelector('.btn-receipt-primary');
+  const origText = btn.textContent;
+  btn.textContent = '⏳ Generating…';
+  btn.disabled = true;
 
-  //  White background
-  doc.setFillColor(255, 255, 255);
-  doc.rect(0, 0, W, H, 'F');
+  try {
+    const card = document.getElementById('receipt-card');
 
-  //  Black header band 
-  doc.setFillColor(0, 0, 0);
-  doc.rect(0, 0, W, headerH, 'F');
+    // Render the live HTML card to a canvas at 2× for sharp output
+    const canvas = await html2canvas(card, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: '#ffffff',
+      logging: false,
+    });
 
-  // Company name
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(18);
-  doc.setTextColor(255, 255, 255);
-  doc.text('AUTOVOICE AI', W / 2, 16, { align: 'center' });
+    const imgData = canvas.toDataURL('image/png');
 
-  // Subtitle
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(6);
-  doc.setTextColor(160, 160, 160);
-  doc.text('AUTOMOTIVE SERVICE BOOKING', W / 2, 23, { align: 'center' });
+    // A5 portrait (148 × 210 mm). Fit card width; let height scale naturally.
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'mm', format: 'a5', orientation: 'portrait' });
 
-  // "BOOKING CONFIRMED" badge — plain rect + centred text only
-  const badgeW = 58, badgeH = 7;
-  const badgeX = (W - badgeW) / 2, badgeY = 28;
-  doc.setDrawColor(255, 255, 255);
-  doc.setLineWidth(0.35);
-  doc.rect(badgeX, badgeY, badgeW, badgeH);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(6.5);
-  doc.setTextColor(255, 255, 255);
-  doc.text('BOOKING CONFIRMED', W / 2, badgeY + 4.8, { align: 'center' });
+    const pageW = 148, pageH = 210;
+    const margin = 10;
+    const usableW = pageW - margin * 2;
 
-  //  Rows
-  // Each row: label line (small grey) + value line (bold black) + separator below
-  const rows = buildReceiptRows(d).filter(r => !r.divider);
-  const rowH = 14;       // total height per row
-  const lblOff = 5;      // label baseline offset from row top
-  const valOff = 10;     // value baseline offset from row top
-  let y = headerH + 7;
+    // Keep aspect ratio
+    const pxW = canvas.width, pxH = canvas.height;
+    const mmH = (pxH / pxW) * usableW;
+    const topOffset = (pageH - mmH) / 2; // vertically centre on page
 
-  rows.forEach((r) => {
-    // Label (small, grey)
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6);
-    doc.setTextColor(150, 150, 150);
-    doc.text(r.label.toUpperCase(), lx, y + lblOff);
-
-    // Value (bold, black, right-aligned)
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.5);
-    doc.setTextColor(0, 0, 0);
-    doc.text(String(r.val), rx, y + valOff, { align: 'right' });
-
-    // Separator after the value
-    doc.setDrawColor(220, 220, 220);
-    doc.setLineWidth(0.2);
-    doc.line(lx, y + rowH - 1, rx, y + rowH - 1);
-
-    y += rowH;
-  });
-
-  //  Footer divider + ref
-  y += 4;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.35);
-  doc.line(lx, y, rx, y);
-  y += 6;
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(6);
-  doc.setTextColor(120, 120, 120);
-  doc.text('REF: ' + d.ref, lx, y);
-  doc.text(d.generatedAt, rx, y, { align: 'right' });
-
-  //  Footer note
-  doc.setFontSize(6);
-  doc.setTextColor(180, 180, 180);
-  doc.text('Please present this receipt at the service center.', W / 2, H - 10, { align: 'center' });
-
-  //  Outer border
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.5);
-  doc.rect(0, 0, W, H);
-
-  doc.save('AutoVoice_Receipt_' + d.ref + '.pdf');
+    doc.addImage(imgData, 'PNG', margin, Math.max(margin, topOffset), usableW, mmH);
+    doc.save('AutoVoice_Receipt_' + d.ref + '.pdf');
+  } finally {
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
 }
 
 /**
