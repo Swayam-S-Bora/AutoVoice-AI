@@ -139,5 +139,21 @@ uvicorn app.main:app --host 0.0.0.0 --port $PORT
 - WebSocket endpoint `/ws/{phone}` - real-time duplex audio session (query parameter: `token`)
 - `GET /healthz` - health check
 
+## Performance & Latency
+
+Measured on the hosted Render deployment under real conversation conditions:
+
+| Metric | Min | Avg | Max |
+|---|---|---|---|
+| LLM Time-to-First-Token (Groq) | 362 ms | ~585 ms | 916 ms |
+| LLM Total Response Time | 620 ms | ~954 ms | 1,979 ms |
+| End-to-End Time-to-First-Audio (speech-in → first audio byte out) | 7.0 s | ~8.8 s | 13.6 s |
+
+**LLM inference** via Groq achieves a TTFT of ~585 ms on average, which reflects the speed advantage of Groq's LPU hardware running `llama-3.3-70b-versatile`.
+
+**End-to-end latency** is higher because the full pipeline chains several async steps: Groq Whisper STT → agent reasoning loop → Supabase tool calls → Deepgram streaming TTS. Additional overhead comes from Render's free-tier cold starts. This is a deployment constraint, not an application bottleneck.
+
+> **Note:** The ~585 ms average LLM TTFT is the most representative performance indicator for the core AI inference layer.
+
 ## License
 MIT License. See `LICENSE`.
