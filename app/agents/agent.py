@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import date as dt_date
 from typing import AsyncIterator
 
@@ -133,11 +134,19 @@ async def _stream_llm_json(messages: list[dict]) -> str:
                 stream=True,
             )
         try:
+            _llm_t0 = time.perf_counter()
             stream = await loop.run_in_executor(None, _call)
             raw = ""
+            _llm_first_token = True
             for chunk in stream:
                 delta = chunk.choices[0].delta.content or ""
+                if delta and _llm_first_token:
+                    _llm_ttft_ms = (time.perf_counter() - _llm_t0) * 1000
+                    agent_logger.info(f"[LATENCY][LLM] TTFT: {_llm_ttft_ms:.0f} ms (key={i + 1})")
+                    _llm_first_token = False
                 raw += delta
+            _llm_total_ms = (time.perf_counter() - _llm_t0) * 1000
+            agent_logger.info(f"[LATENCY][LLM] Total: {_llm_total_ms:.0f} ms | tokens~{len(raw.split())} words")
             return raw
         except Exception as exc:
             error_logger.warning(f"[GROQ] Key {i + 1} failed: {exc}. Trying next key...")
@@ -193,6 +202,7 @@ async def run_agent_stream(
     """
     agent_logger.info(f"[***{phone[-4:]}] -- NEW TURN --")
     agent_logger.info(f"[***{phone[-4:]}] User: {user_input[:120]}")
+    _agent_t0 = time.perf_counter()  # E2E timer: starts when agent receives text
 
     try:
         state, history, last_booking = await asyncio.gather(
@@ -622,8 +632,13 @@ async def run_agent_stream(
         if text_callback:
             await text_callback(final_response)
 
+        _agent_first_audio = True
         async for sentence in _extract_response_sentences(final_response):
             async for chunk in text_to_speech_stream(sentence):
+                if _agent_first_audio:
+                    _agent_e2e_ms = (time.perf_counter() - _agent_t0) * 1000
+                    agent_logger.info(f"[LATENCY][E2E] Agent+TTS first audio byte: {_agent_e2e_ms:.0f} ms")
+                    _agent_first_audio = False
                 yield chunk
 
     except Exception as e:

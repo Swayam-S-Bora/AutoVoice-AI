@@ -8,6 +8,7 @@ routes.py — WebSocket-first transport layer
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -129,10 +130,11 @@ async def websocket_endpoint(
     pending_text: list[str] = []
     pending_date: str | None = None
     coalesce_task: asyncio.Task | None = None
+    _rtt_t0: float = 0.0
 
     async def _flush_to_agent():
         """Send the coalesced transcript to the agent and stream audio back."""
-        nonlocal pending_text, pending_date, coalesce_task
+        nonlocal pending_text, pending_date, coalesce_task, _rtt_t0
         combined = " ".join(pending_text).strip()
         date_hint = pending_date
         pending_text = []
@@ -154,11 +156,16 @@ async def websocket_endpoint(
             except Exception:
                 pass
 
+        _flush_first_audio = True
         async for audio_chunk in run_agent_stream(
             combined, phone,
             resolved_date=date_hint,
             text_callback=_send_agent_text,
         ):
+            if _flush_first_audio and _rtt_t0:
+                _rtt_ms = (time.perf_counter() - _rtt_t0) * 1000
+                access_logger.info(f"[LATENCY][RTT] Full round-trip (STT+Agent+TTS): {_rtt_ms:.0f} ms")
+                _flush_first_audio = False
             await websocket.send_bytes(audio_chunk)
         await websocket.send_bytes(END_OF_RESPONSE)
 
@@ -196,6 +203,7 @@ async def websocket_endpoint(
                     continue
 
                 # STT in executor (Groq Whisper is sync)
+                _rtt_t0 = time.perf_counter()  # Full round-trip timer: audio → first audio byte back
                 loop = asyncio.get_event_loop()
                 transcript = await loop.run_in_executor(
                     None, speech_to_text_sync, raw_audio, "audio/webm"

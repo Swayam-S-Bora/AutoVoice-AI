@@ -13,6 +13,7 @@ import asyncio
 import io
 import random
 import re
+import time
 from typing import AsyncIterator
 
 import httpx
@@ -185,6 +186,7 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
     try:
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = "audio.webm"  # Groq needs a filename with extension
+        _stt_t0 = time.perf_counter()
         transcript = _groq.audio.transcriptions.create(
             model="whisper-large-v3-turbo",
             file=audio_file,
@@ -192,6 +194,8 @@ def speech_to_text_sync(audio_bytes: bytes, mime_type: str = "audio/webm") -> st
             language="en",          # pin to English — stops non-Latin hallucinations
             prompt=_WHISPER_PROMPT, # primes model for Indian names/car brands/accents
         )
+        _stt_ms = (time.perf_counter() - _stt_t0) * 1000
+        app_logger.info(f"[LATENCY][STT] Groq Whisper: {_stt_ms:.0f} ms (audio={len(audio_bytes)} bytes)")
         text = (transcript.strip() if isinstance(transcript, str) else transcript.text.strip())
 
         # Drop known Whisper hallucinations on silence/noise (case-insensitive)
@@ -227,11 +231,13 @@ async def text_to_speech_stream(text: str) -> AsyncIterator[bytes]:
     If the phrase is in the cache, yields the cached blob immediately.
     """
     if text in _phrase_cache:
-        app_logger.info("[TTS] Cache hit")
+        app_logger.info("[LATENCY][TTS] Cache hit — 0 ms (pre-warmed phrase)")
         yield _phrase_cache[text]
         return
 
     try:
+        _tts_t0 = time.perf_counter()
+        _tts_first_chunk = True
         async with httpx.AsyncClient(timeout=30) as client:
             async with client.stream(
                 "POST",
@@ -243,6 +249,13 @@ async def text_to_speech_stream(text: str) -> AsyncIterator[bytes]:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes(chunk_size=4096):
                     if chunk:
+                        if _tts_first_chunk:
+                            _tts_ttfa_ms = (time.perf_counter() - _tts_t0) * 1000
+                            app_logger.info(
+                                f"[LATENCY][TTS] Deepgram TTFA: {_tts_ttfa_ms:.0f} ms "
+                                f"(text_len={len(text)})"
+                            )
+                            _tts_first_chunk = False
                         yield chunk
     except Exception as e:
         error_logger.error(f"[TTS] Deepgram stream failed: {e}")
