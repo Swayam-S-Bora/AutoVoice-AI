@@ -14,6 +14,8 @@ class Settings:
             os.getenv("GROQ_API_KEY_3", ""),
             os.getenv("GROQ_API_KEY_4", ""),
             os.getenv("GROQ_API_KEY_5", ""),
+            os.getenv("GROQ_API_KEY_6", ""),
+            os.getenv("GROQ_API_KEY_7", ""),
         ]
         if key.strip()
     ]
