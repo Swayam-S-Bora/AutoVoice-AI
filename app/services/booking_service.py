@@ -125,7 +125,6 @@ def update_booking(phone: str, updates: dict):
                         if k not in ("name", "car_model") and v}
 
         if not appt_updates:
-            # Only customer fields were changed — fetch and return the appointment row
             appt_res = supabase.table("appointments") \
                 .select("*") \
                 .eq("customer_id", customer_id) \
@@ -150,7 +149,6 @@ def update_booking(phone: str, updates: dict):
         existing = appt_res.data[0]
         appt_id = existing["id"]
 
-        # Build the patch dict — only update what was supplied
         patch = {}
         new_date = appt_updates.get("date") or existing["appointment_date"]
         new_start = appt_updates.get("start_time") or existing["start_time"]
@@ -166,29 +164,22 @@ def update_booking(phone: str, updates: dict):
         if not patch:
             return {"error": "No valid fields supplied for update."}
 
-        # Check slot availability for the (possibly new) date/time
         new_start_time = new_start
         available = get_available_slots(new_date, new_service)
         available_times = [s["start_time"] for s in available]
 
-        # When checking availability for an update, the existing slot
-        # counts as "available" to itself, so temporarily exclude it
-        # from conflict detection by also checking the original date matches.
         if (new_date == existing["appointment_date"]
                 and new_start_time == existing["start_time"]
                 and new_service == existing["service_type"]):
-            # Nothing meaningful changed in appointment — succeed without touching DB
             return existing
 
         if new_start_time not in available_times:
-            # Return the available slots so the agent can offer alternatives
             return {
                 "error": "Slot not available",
                 "available_slots": available_times,
                 "date": new_date,
             }
 
-        # Recalculate end_time
         duration = SERVICE_DURATION[new_service.lower()]
         start_dt = datetime.strptime(f"{new_date} {new_start_time}", "%Y-%m-%d %H:%M")
         end_dt = start_dt + timedelta(minutes=duration)
@@ -205,3 +196,63 @@ def update_booking(phone: str, updates: dict):
     except Exception as e:
         error_logger.error(f"update_booking error: {str(e)}")
         return {"error": f"Update failed: {str(e)}"}
+
+
+def cancel_booking(phone: str):
+    """
+    Find the most recent 'booked' appointment for this phone, delete it from the
+    appointments table, and return the cancelled booking details (for the receipt).
+    Returns the deleted appointment row dict or {"error": "..."}.
+    """
+    try:
+        app_logger.info(f"Cancelling booking | phone=***{phone[-4:]}")
+
+        # Resolve customer
+        cust_res = supabase.table("customers") \
+            .select("id, name, car_model") \
+            .eq("phone", phone) \
+            .limit(1) \
+            .execute()
+
+        if not cust_res.data:
+            return {"error": "No customer found for this phone number."}
+
+        customer = cust_res.data[0]
+        customer_id = customer["id"]
+
+        # Find most recent booked appointment
+        appt_res = supabase.table("appointments") \
+            .select("*") \
+            .eq("customer_id", customer_id) \
+            .eq("status", "booked") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+
+        if not appt_res.data:
+            return {"error": "No active booking found to cancel."}
+
+        appt = appt_res.data[0]
+        appt_id = appt["id"]
+
+        # Delete the appointment row
+        supabase.table("appointments") \
+            .delete() \
+            .eq("id", appt_id) \
+            .execute()
+
+        app_logger.info(f"Booking deleted | appt_id={appt_id}")
+
+        # Return the cancelled booking details for the receipt
+        return {
+            "cancelled": True,
+            "name": customer.get("name"),
+            "car_model": customer.get("car_model"),
+            "service_type": appt.get("service_type"),
+            "date": appt.get("appointment_date"),
+            "time": appt.get("start_time"),
+        }
+
+    except Exception as e:
+        error_logger.error(f"cancel_booking error: {str(e)}")
+        return {"error": f"Cancellation failed: {str(e)}"}

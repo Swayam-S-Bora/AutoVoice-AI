@@ -149,7 +149,7 @@ async def websocket_endpoint(
         # Send agent response text as a text frame for UI captions.
         async def _send_agent_text(text: str):
             try:
-                if text.startswith("booking_confirmed:"):
+                if text.startswith("booking_confirmed:") or text.startswith("booking_cancelled:"):
                     await websocket.send_text(text)
                 else:
                     await websocket.send_text(f"agent:{text}")

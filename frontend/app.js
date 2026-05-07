@@ -300,6 +300,44 @@ async function connect(phone) {
           console.warn('Failed to parse booking_confirmed payload', e);
         }
       }
+      else if (ev.data.startsWith('booking_cancelled:')) {
+        // Cancellation receipt payload from backend
+        try {
+          const raw = JSON.parse(ev.data.slice('booking_cancelled:'.length));
+          const svcMap = { full: 'Full Service', basic: 'Basic Service' };
+          const svc = svcMap[raw.service_type?.toLowerCase()] || raw.service_type || 'Automotive Service';
+          let dateLabel = raw.date || 'As Scheduled';
+          if (raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)) {
+            const [y, m, d] = raw.date.split('-').map(Number);
+            dateLabel = new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+              day: '2-digit', month: 'short', year: 'numeric'
+            });
+          }
+          let timeLabel = raw.time || 'As Scheduled';
+          if (raw.time && /^\d{2}:\d{2}$/.test(raw.time)) {
+            const [h, min] = raw.time.split(':').map(Number);
+            const suffix = h >= 12 ? 'PM' : 'AM';
+            const h12 = h % 12 || 12;
+            timeLabel = min === 0 ? `${h12} ${suffix}` : `${h12}:${String(min).padStart(2,'0')} ${suffix}`;
+          }
+          _pendingReceiptData = {
+            cancelled:   true,
+            service:     svc,
+            date:        dateLabel,
+            time:        timeLabel,
+            name:        raw.name     || null,
+            vehicle:     raw.car_model || null,
+            phone:       null,
+            ref:         'AV-' + Date.now().toString(36).toUpperCase().slice(-6),
+            generatedAt: new Date().toLocaleString('en-IN', {
+              day: '2-digit', month: 'short', year: 'numeric',
+              hour: '2-digit', minute: '2-digit', hour12: true,
+            }),
+          };
+        } catch(e) {
+          console.warn('Failed to parse booking_cancelled payload', e);
+        }
+      }
       else if (ev.data.startsWith('agent:')) addMsg('agent', ev.data.slice(6));
       return;
     }
@@ -427,14 +465,15 @@ function buildReceiptRows(data) {
   if (data.vehicle) rows.push({ label: 'Vehicle', val: data.vehicle });
   if (data.phone)   rows.push({ label: 'Phone', val: data.phone });
   rows.push({ divider: true });
-  rows.push({ label: 'Status', val: 'CONFIRMED' });
+  rows.push({ label: 'Status', val: data.cancelled ? 'CANCELLED' : 'CONFIRMED' });
   return rows;
 }
 
 function renderReceiptCard(data) {
-  const rowsEl = document.getElementById('receipt-rows');
-  const refEl  = document.getElementById('receipt-ref');
-  const rows   = buildReceiptRows(data);
+  const rowsEl  = document.getElementById('receipt-rows');
+  const refEl   = document.getElementById('receipt-ref');
+  const badgeEl = document.getElementById('receipt-badge');
+  const rows    = buildReceiptRows(data);
 
   rowsEl.innerHTML = rows.map(r => {
     if (r.divider) return '<div class="receipt-divider"></div>';
@@ -445,6 +484,19 @@ function renderReceiptCard(data) {
   }).join('');
 
   refEl.textContent = `Generated ${data.generatedAt} · Ref ${data.ref}`;
+
+  // Swap badge text + style based on whether this is a cancellation receipt
+  if (badgeEl) {
+    if (data.cancelled) {
+      badgeEl.textContent = 'Booking Cancelled';
+      badgeEl.style.borderColor = '#ff4444';
+      badgeEl.style.color = '#ff4444';
+    } else {
+      badgeEl.textContent = 'Booking Confirmed';
+      badgeEl.style.borderColor = '';
+      badgeEl.style.color = '';
+    }
+  }
 }
 
 function showReceipt(data) {
@@ -515,10 +567,11 @@ function injectReceiptIntoMessage(msgEl, data) {
 
   const chip = document.createElement('div');
   chip.className = 'receipt-attachment';
+  const chipTitle = data.cancelled ? 'Cancellation Receipt' : 'Booking Receipt';
   chip.innerHTML = `
     <span class="receipt-attachment-icon">📄</span>
     <div class="receipt-attachment-info">
-      <div class="receipt-attachment-name">Booking Receipt</div>
+      <div class="receipt-attachment-name">${chipTitle}</div>
       <div class="receipt-attachment-meta">Ref: ${data.ref} · Tap to view &amp; download</div>
     </div>
     <span class="receipt-attachment-open">VIEW →</span>

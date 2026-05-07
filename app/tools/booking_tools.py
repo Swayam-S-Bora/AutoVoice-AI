@@ -1,4 +1,4 @@
-from app.services.booking_service import get_available_slots, create_booking, update_booking
+from app.services.booking_service import get_available_slots, create_booking, update_booking, cancel_booking
 from app.core.logger import log_action
 
 
@@ -52,4 +52,16 @@ def tool_update_booking(input_data: dict):
 
     result = update_booking(phone, updates)
     log_action("update_booking", input_data, result)
+    return result
+
+
+def tool_cancel_booking(input_data: dict):
+    """
+    Cancels (deletes) the most recent booked appointment for this phone number.
+    Args: { "phone": str }
+    Returns the cancelled booking details or {"error": "..."}.
+    """
+    phone = input_data.get("phone")
+    result = cancel_booking(phone)
+    log_action("cancel_booking", input_data, result)
     return result
