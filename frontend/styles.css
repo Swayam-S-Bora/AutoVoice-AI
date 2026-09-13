@@ -479,6 +479,66 @@
       30%        {transform:translateY(-6px);opacity:1}
     }
 
+    /* Chat input bar (typed messages) */
+    .chat-input-bar {
+      flex-shrink: 0;
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: clamp(10px,1.6vh,14px) clamp(14px,2vw,26px);
+      border-top: 1px solid var(--border);
+      background: rgba(255,255,255,.012);
+    }
+
+    #chat-input {
+      flex: 1;
+      resize: none;
+      min-height: 40px;
+      max-height: 120px;
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 3px;
+      color: var(--text-bright);
+      font-family: var(--body);
+      font-size: clamp(0.8rem,1.2vw,0.88rem);
+      line-height: 1.5;
+      padding: 9px 12px;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s, opacity .2s;
+    }
+    #chat-input::-webkit-scrollbar { width: 3px; }
+    #chat-input::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+    #chat-input::placeholder { color: var(--text-dim); }
+    #chat-input:focus {
+      border-color: var(--amber-dim);
+      box-shadow: 0 0 0 1px rgba(232,160,48,.08), 0 0 16px rgba(232,160,48,.06);
+    }
+    #chat-input:disabled { opacity: .45; cursor: not-allowed; }
+
+    #chat-send-btn {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      border-radius: 3px;
+      border: 1px solid var(--amber-dim);
+      background: rgba(232,160,48,.07);
+      color: var(--amber);
+      font-size: 1rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all .18s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #chat-send-btn:hover:not(:disabled) {
+      background: rgba(232,160,48,.14);
+      box-shadow: 0 0 14px rgba(232,160,48,.25);
+    }
+    #chat-send-btn:active:not(:disabled) { transform: scale(.94); }
+    #chat-send-btn:disabled { opacity: .35; cursor: not-allowed; }
+
     /*  FOOTER  */
     footer {
       position: relative;
@@ -551,6 +611,8 @@
       .field-label { display: none; }
 
       .panel-right { flex: 1; min-height: 0; }
+
+      .chat-input-bar { padding: 8px 12px; }
 
       footer {
         padding: 7px 14px;
