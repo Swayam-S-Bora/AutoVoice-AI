@@ -19,6 +19,8 @@ const hMsgs      = document.getElementById('h-msgs');
 const hSess      = document.getElementById('h-sess');
 const fSys       = document.getElementById('f-sys');
 const fMsgs      = document.getElementById('f-msgs');
+const chatInput  = document.getElementById('chat-input');
+const chatSendBtn= document.getElementById('chat-send-btn');
 
 //  STATE 
 let ws            = null;
@@ -59,6 +61,15 @@ function setStatus(msg, cls = '') {
 function showError(msg) {
   errLine.textContent = msg;
   setTimeout(() => { errLine.textContent = ''; }, 4500);
+}
+
+// Keep mic + text input mutually gated: while one turn is in flight
+// (audio uploading/processing, or agent speaking) the other input mode
+// is disabled too, so voice and text never race on the same session.
+function setInputsBusy(busy) {
+  micBtn.disabled     = busy;
+  chatInput.disabled  = busy || !ws || ws.readyState !== WebSocket.OPEN;
+  chatSendBtn.disabled= busy || !ws || ws.readyState !== WebSocket.OPEN;
 }
 
 //  TIMER 
@@ -194,7 +205,7 @@ function drainQueue() {
     if (streamDone) {
       isPlaying = false;
       micBtn.classList.remove('playing');
-      micBtn.disabled = false;
+      setInputsBusy(false);
       waveBars.classList.remove('on');
       setStatus('READY', 'active');
     }
@@ -250,7 +261,7 @@ async function connect(phone) {
       micStream.getAudioTracks().forEach(t => { t.enabled = false; });
       startViz(micStream);
     } catch { showError('Mic access denied'); }
-    micBtn.disabled = false;
+    setInputsBusy(false);
     connectBtn.textContent = 'END';
     connectBtn.classList.add('disc');
     connectBtn.onclick = disconnect;
@@ -315,13 +326,13 @@ async function connect(phone) {
     if (ev.code === 4001) showError('Auth failed — reconnect');
     else if (ev.code === 4000) showError('Invalid phone number');
     setStatus('OFFLINE');
-    micBtn.disabled = true;
+    ws = null;
+    setInputsBusy(true);
     waveBars.classList.remove('on');
     connectBtn.textContent = 'CONNECT';
     connectBtn.classList.remove('disc');
     connectBtn.onclick = () => handleConnect();
     stopTimer();
-    ws = null;
   };
 }
 
@@ -346,6 +357,8 @@ function startRecording() {
   };
   mediaRecorder.start(100);
   micBtn.classList.add('recording');
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
   setStatus('RECORDING', 'recording');
 }
 
@@ -358,7 +371,7 @@ function stopRecording() {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(new Uint8Array([0x00]).buffer);
     setStatus('PROCESSING…', 'active');
-    micBtn.disabled = true;
+    setInputsBusy(true);
     showTyping();
     streamDone = false; chunksReceived = 0; isPlaying = false; pcmQueue = [];
   }
@@ -380,6 +393,42 @@ micBtn.addEventListener('mouseup',    stopRecording);
 micBtn.addEventListener('mouseleave', stopRecording);
 micBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); }, { passive: false });
 micBtn.addEventListener('touchend',   e => { e.preventDefault(); stopRecording(); },  { passive: false });
+
+//  TYPED CHAT INPUT 
+function autoResizeChatInput() {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+}
+chatInput.addEventListener('input', autoResizeChatInput);
+
+function sendTypedMessage() {
+  if (chatInput.disabled) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showError('Connect first'); return; }
+
+  const text = chatInput.value.trim();
+  if (!text) return;
+
+  // Optimistic local echo — same bubble style/behaviour as a voice transcript,
+  // including the receipt-detection pass in addMsg().
+  addMsg('user', text);
+
+  ws.send('text:' + text);
+  setStatus('PROCESSING…', 'active');
+  setInputsBusy(true);
+  showTyping();
+  streamDone = false; chunksReceived = 0; isPlaying = false; pcmQueue = [];
+
+  chatInput.value = '';
+  autoResizeChatInput();
+}
+
+chatSendBtn.addEventListener('click', sendTypedMessage);
+chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendTypedMessage();
+  }
+});
 
 //  RECEIPT LOGIC 
 let _lastReceiptData    = null;

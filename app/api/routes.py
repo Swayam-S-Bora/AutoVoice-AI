@@ -73,11 +73,14 @@ async def chat(
 
 # WS /ws/{phone} — persistent WebSocket for full conversation session
 #
-# Protocol (binary frames):
-#   Client → Server : raw audio bytes (WebM/Opus from MediaRecorder)
+# Protocol:
+#   Client → Server (binary) : raw audio bytes (WebM/Opus from MediaRecorder)
 #                     Signal end-of-utterance with a single b"\x00" frame
-#   Server → Client : raw PCM audio chunks (24 kHz, 16-bit, mono, little-endian)
+#   Client → Server (text)   : "text:<message>" — typed chat input, bypasses STT
+#                     and is sent straight to the agent as a completed turn.
+#   Server → Client (binary) : raw PCM audio chunks (24 kHz, 16-bit, mono, little-endian)
 #                     Signal end-of-response with a single b"\xFF\xFE" frame
+#   Server → Client (text)   : "user:<transcript>" / "agent:<text>" / "booking_confirmed:<json>"
 END_OF_UTTERANCE = b"\x00"
 END_OF_RESPONSE  = b"\xFF\xFE"
 
@@ -174,9 +177,53 @@ async def websocket_endpoint(
         await asyncio.sleep(COALESCE_WINDOW_S)
         await _flush_to_agent()
 
+    async def _handle_typed_text(raw_text: str):
+        """Handle a typed chat message — bypasses STT and goes straight to the agent.
+
+        A typed message is already a complete turn (unlike a voice utterance,
+        which may be a mid-sentence fragment), so we cancel any pending
+        voice-coalesce flush, merge it in, and flush immediately.
+        """
+        nonlocal coalesce_task, pending_text, pending_date, _rtt_t0
+
+        user_text = raw_text.strip()[:1000]
+        if not user_text:
+            return
+
+        access_logger.info(f"[WS] ***{phone[-4:]} | typed: '{user_text[:80]}'")
+
+        safe_text = sanitise_transcript(user_text)
+        text, resolved_date = preprocess_input(safe_text)
+
+        if coalesce_task and not coalesce_task.done():
+            coalesce_task.cancel()
+
+        pending_text.append(text)
+        if resolved_date and not pending_date:
+            pending_date = resolved_date
+
+        _rtt_t0 = time.perf_counter()
+        await _flush_to_agent()
+
     try:
         while True:
-            data = await websocket.receive_bytes()
+            message = await websocket.receive()
+
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect()
+
+            # Typed chat message arrives as a text frame: "text:<message>"
+            if message.get("text") is not None:
+                raw_text = message["text"]
+                if raw_text.startswith("text:"):
+                    await _handle_typed_text(raw_text[len("text:"):])
+                else:
+                    access_logger.warning(f"[WS] ***{phone[-4:]} | unrecognised text frame ignored")
+                continue
+
+            data = message.get("bytes")
+            if data is None:
+                continue
 
             # End-of-utterance marker 
             if data == END_OF_UTTERANCE:
