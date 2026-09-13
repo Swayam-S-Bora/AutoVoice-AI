@@ -20,7 +20,7 @@ class Settings:
         ]
         if key.strip()
     ]
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
